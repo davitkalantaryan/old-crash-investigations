@@ -12,7 +12,7 @@ From time to time this not possible for several reasons:
 Not in all cases mentioned above there is guarantied method that will solve everything, but at least here you will find some hints those should work for many cases  
  
 ## Methods  
-  - For UNIX implementing signal handler for SIGSEGV, that do following
+  - For UNIX implementing signal handler for SIGSEGV, that do following  
   -- thread name  
   -- stack calculation  
   
