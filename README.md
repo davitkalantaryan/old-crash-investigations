@@ -9,7 +9,8 @@ From time to time this not possible for several reasons:
  - Crash happens in very early stage of application  
  - Crash happens inside third party library (missing the sources)  
  - Crash happens not in the time of faulty code execution. For example memory is cleaned twice by some erroneous code, then crash due to this can happen later  
-Not in all cases mentioned above there is guarantied method that will solve everything, but at least here you will find some hints those should work for many cases  
+Not in all cases mentioned above there is guarantied method that will solve everything, but at least here you will find some hints those should work for many cases.  
+With this developer will have [valgrind](http://valgrind.org/docs/manual/quick-start.html) on hand.   
  
 ## Methods  
   - For UNIX implementing signal handler for SIGSEGV, that do following  
