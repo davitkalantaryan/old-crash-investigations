@@ -1,0 +1,37 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio 15
+VisualStudioVersion = 15.0.28307.539
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "investigator", "investigator.vcxproj", "{6562AA58-00EA-4787-A5A1-9EECF29446CF}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|ARM = Debug|ARM
+		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
+		Release|ARM = Release|ARM
+		Release|x64 = Release|x64
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Debug|ARM.ActiveCfg = Debug|ARM
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Debug|ARM.Build.0 = Debug|ARM
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Debug|x64.ActiveCfg = Debug|x64
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Debug|x64.Build.0 = Debug|x64
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Debug|x86.ActiveCfg = Debug|Win32
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Debug|x86.Build.0 = Debug|Win32
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Release|ARM.ActiveCfg = Release|ARM
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Release|ARM.Build.0 = Release|ARM
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Release|x64.ActiveCfg = Release|x64
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Release|x64.Build.0 = Release|x64
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Release|x86.ActiveCfg = Release|Win32
+		{6562AA58-00EA-4787-A5A1-9EECF29446CF}.Release|x86.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {E96E928C-5A68-4C27-97BA-96698C610D05}
+	EndGlobalSection
+EndGlobal
