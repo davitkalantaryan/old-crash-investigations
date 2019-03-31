@@ -29,7 +29,9 @@ gui_wallet.app
 *after-import-key-*.wallet
 *.so*
 
-prj/*/*/*
+prj/*/*_vs/.vs/
+prj/*/*_vs/*.db/
+#prj/*/*/*
 !prj/*/*/*.vcxproj
 !prj/*/*/*.sln
 !prj/*/*/*.pro

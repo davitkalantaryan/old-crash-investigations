@@ -1,0 +1,23 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ImportGroup Label="PropertySheets" />
+  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup>
+    <IntDir>..\..\..\sys\$(TargetFolderBase)\.objects\$(ProjectName)\</IntDir>
+    <SourcePath>$(UDOOCSROOT_AMD64_dev)\dev\src\clientlib\pktrclntlib;$(UDOOCSROOT_AMD64_dev)\dev\src\clientlib;$(UDOOCSROOT_AMD64_dev)\dev\src\serverlib;$(SourcePath)</SourcePath>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <PreBuildEvent>
+      <Command>::..\..\..\util\set_windows_target_platform.exe $(ProjectPath) $(WinTargetPlatformVersion)</Command>
+    </PreBuildEvent>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(UDOOCSROOT_AMD64_dev)\dev\src\clientlib;$(UDOOCSROOT_AMD64_dev)\dev\src\clientlib\pktrclntlib;$(UDOOCSROOT_AMD64_dev)\dev\include\doocs;$(UDOOCSROOT_AMD64_dev)\dev\include\wlac;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ForcedIncludeFiles>common_windows_doocs_client_header.h</ForcedIncludeFiles>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(UDOOCSROOT_AMD64_dev)\dev\sys\$(TargetFolderBase)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>DOOCSapi.lib;wlac.lib</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup />
+</Project>

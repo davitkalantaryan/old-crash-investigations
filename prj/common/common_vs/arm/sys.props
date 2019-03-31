@@ -1,0 +1,40 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ImportGroup Label="PropertySheets" />
+  <PropertyGroup Label="UserMacros">
+    <TargetCompilerName>arm</TargetCompilerName>
+    <TargetFolderBase>arm_win</TargetFolderBase>
+    <MatlabIncludeDir>..\..\..\contrib\matlab\include</MatlabIncludeDir>
+    <MexExtension>mexwarm</MexExtension>
+    <ProcessorArch>ARM</ProcessorArch>
+    <DebugHost>znpi03</DebugHost>
+  </PropertyGroup>
+  <PropertyGroup />
+  <ItemDefinitionGroup />
+  <ItemGroup>
+    <BuildMacro Include="TargetCompilerName">
+      <Value>$(TargetCompilerName)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="TargetFolderBase">
+      <Value>$(TargetFolderBase)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="MatlabIncludeDir">
+      <Value>$(MatlabIncludeDir)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="MexExtension">
+      <Value>$(MexExtension)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="ProcessorArch">
+      <Value>$(ProcessorArch)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+    <BuildMacro Include="DebugHost">
+      <Value>$(DebugHost)</Value>
+      <EnvironmentVariable>true</EnvironmentVariable>
+    </BuildMacro>
+  </ItemGroup>
+</Project>
