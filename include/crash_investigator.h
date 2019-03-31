@@ -30,11 +30,14 @@
 
 BEGIN_C_DECL_2
 
-enum HookType {HookTypeMalloc, HookTypeCalloc, HookTypeRealloc, HookTypeFree};
-typedef void(*TypeHookFunction)(enum HookType type,size_t size,void* _memory);
+enum MemoryType {CreatedByMalloc,CreatedByNew, CreatedByNewArray};
+enum HookType {HookTypeMallocC, HookTypeCallocC, HookTypeReallocC, HookTypeFreeC,HookTypeNewCpp,HookTypeDeleteCpp,HookTypeNewArrayCpp,HookTypeDeleteArrayCpp};
+typedef void(*TypeHookFunction)(enum HookType type,void* memoryCreatedOrWillBeFreed, size_t size, void* _memoryForRealloc);
 
+extern int g_nVerbosity;
 extern TypeHookFunction g_MemoryHookFunction;
 void InitializeCrashAnalizer(void);
+void CleanupCrashAnalizer(void);
 
 END_C_DECL_2
 
