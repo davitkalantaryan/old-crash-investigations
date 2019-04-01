@@ -2,6 +2,9 @@
 message ("investigator.pro") 
 include(../../common/common_qt/sys_common.pri)
 
+QMAKE_CFLAGS += -rdynamic
+QMAKE_CXXFLAGS += -rdynamic
+
 INCLUDEPATH += $${PWD}/../../../include
 
 SOURCES  += \

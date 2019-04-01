@@ -30,14 +30,16 @@
 
 BEGIN_C_DECL_2
 
+typedef int BOOL_T_2  ;
 enum MemoryType {CreatedByMalloc,CreatedByNew, CreatedByNewArray};
 enum HookType {HookTypeMallocC, HookTypeCallocC, HookTypeReallocC, HookTypeFreeC,HookTypeNewCpp,HookTypeDeleteCpp,HookTypeNewArrayCpp,HookTypeDeleteArrayCpp};
-typedef void(*TypeHookFunction)(enum HookType type,void* memoryCreatedOrWillBeFreed, size_t size, void* _memoryForRealloc);
+typedef BOOL_T_2 (*TypeHookFunction)(enum HookType type,void* memoryCreatedOrWillBeFreed, size_t size, void* _memoryForRealloc);
 
 extern int g_nVerbosity;
-extern TypeHookFunction g_MemoryHookFunction;
+
 void InitializeCrashAnalizer(void);
 void CleanupCrashAnalizer(void);
+TypeHookFunction SetMemoryInvestigator(TypeHookFunction a_newFnc);
 
 END_C_DECL_2
 
