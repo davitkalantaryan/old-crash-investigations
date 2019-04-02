@@ -23,7 +23,7 @@
 #include <execinfo.h>
 
 #define DUMP_NOT_USED_ARGS(...)
-#define GRANULARITY                 24
+#define GRANULARITY                 1024
 #define STACK_MAX_SIZE  256
 
 #ifndef weak_variable
@@ -244,10 +244,12 @@ static void RemoveSMemoryItemFromList(struct SMemoryItem * a_pItem, struct SMemo
 
 static struct SMemoryItem* FindMemoryItem(void* a_memoryJustCreatedOrWillBeFreed, struct SMemoryItemList* a_pList)
 {
+    ptrdiff_t ptrDiff;
     char* pAddressToRemove = STATIC_CAST(char*,a_memoryJustCreatedOrWillBeFreed);
     struct SMemoryItem* pItem=a_pList->first;
     while(pItem){
-        if(pItem->startingAddress2==pAddressToRemove){
+        ptrDiff = pItem->startingAddress2-pAddressToRemove;
+        if(!ptrDiff){
             return pItem;
         }
         pItem = pItem->next;
@@ -269,19 +271,26 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
     BOOL_T_2 bContinue;
 
     snRecursing = 1;
-    if(!nRecr){
-        __malloc_hook=&my_malloc_hook_static_raw;
-        __realloc_hook=&my_realloc_hook_static_raw;
-        __free_hook = &my_free_hook_static_raw;
-        bContinue = (*s_MemoryHookFunction)(a_type,a_memoryJustCreatedOrWillBeFreed,a_size,a_pMemorForRealloc);
+    switch(a_type){
+    case HookTypeFreeC: case HookTypeDeleteCpp: case HookTypeDeleteArrayCpp:
+        if(!nRecr){
+            __malloc_hook=&my_malloc_hook_static_raw;
+            __realloc_hook=&my_realloc_hook_static_raw;
+            __free_hook = &my_free_hook_static_raw;
+            bContinue = (*s_MemoryHookFunction)(a_type,a_memoryJustCreatedOrWillBeFreed,a_size,a_pMemorForRealloc);
 
-        if(!bContinue){
-            __malloc_hook = s_malloc_hook_initial_c;
-            __realloc_hook = s_realloc_hook_initial_c;
-            __free_hook = s_free_hook_initial;
-            goto returnPoint;
+            if(!bContinue){
+                __malloc_hook = s_malloc_hook_initial_c;
+                __realloc_hook = s_realloc_hook_initial_c;
+                __free_hook = s_free_hook_initial;
+                goto returnPoint;
+            }
         }
+        break;
+    default:
+        break;
     }
+
 
     __malloc_hook = s_malloc_hook_initial_c;
     __realloc_hook = s_realloc_hook_initial_c;
@@ -313,6 +322,26 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
         }
         break;
     default:
+        break;
+    }
+
+    switch(a_type){
+    case HookTypeFreeC: case HookTypeDeleteCpp: case HookTypeDeleteArrayCpp:
+        break;
+    default:
+        if(!nRecr){
+            __malloc_hook=&my_malloc_hook_static_raw;
+            __realloc_hook=&my_realloc_hook_static_raw;
+            __free_hook = &my_free_hook_static_raw;
+            bContinue = (*s_MemoryHookFunction)(a_type,a_memoryJustCreatedOrWillBeFreed,a_size,a_pMemorForRealloc);
+
+            if(!bContinue){
+                __malloc_hook = s_malloc_hook_initial_c;
+                __realloc_hook = s_realloc_hook_initial_c;
+                __free_hook = s_free_hook_initial;
+                goto returnPoint;
+            }
+        }
         break;
     }
 
@@ -421,7 +450,8 @@ analizePoint:
 
 }
 
-#define BACKTRACE_MALLOC_HOOK_BUFFER_SIZE   16384
+//#define BACKTRACE_MALLOC_HOOK_BUFFER_SIZE   16384
+#define BACKTRACE_MALLOC_HOOK_BUFFER_SIZE   2048
 static char s_vcBacktraceSymbolsBuffer[BACKTRACE_MALLOC_HOOK_BUFFER_SIZE];
 static size_t s_unOffsetInInlineMemory = 0;
 
@@ -460,16 +490,19 @@ static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepn
         __realloc_hook = &realloc_hook_for_backtrace;
         __free_hook = &free_hook_for_backtrace;
         ppSymbols = backtrace_symbols(a_pBacktrace,a_nStackDeepness);
-        __malloc_hook=__malloc_hook_initial;
-        __realloc_hook=__realloc_hook_initial;
-        __free_hook = __free_hook_initial;
         if(ppSymbols){
             for(int32_t i=0; i<a_nStackDeepness; ++i)
             {
                 printf("%s\n",ppSymbols[i]);
             }
         }
+
+        free(ppSymbols);
+        __malloc_hook = s_malloc_hook_initial_c;
+        __realloc_hook = s_realloc_hook_initial_c;
+        __free_hook = s_free_hook_initial;
     }
+
 }
 
 
