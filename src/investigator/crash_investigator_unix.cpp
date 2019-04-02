@@ -15,250 +15,261 @@
   *   - https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/crtsetallochook?view=vs-2017 
   *   - https://ide.geeksforgeeks.org/F10DpiEh8N 
   */
-#include <crash_investigator.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <stdint.h>
-#ifdef _WIN32
-#else
-#include <pthread.h>
-#include <execinfo.h>
-static pthread_rwlock_t s_rw_lock;
-#endif
 
+#if 0
 
 #ifdef __GNUC__
-#define DO_PRAGMA(x) _Pragma (#x)
-#if 0
-#define PUSH_WARNING(_warning) \
-    DO_PRAGMA ( GCC diagnostic push ) \
-    DO_PRAGMA ( GCC diagnostic ignored #_warning )
-#define POP_WARNING() DO_PRAGMA ( GCC diagnostic pop )
-#endif
-#define PUSH_WARNING(_warning)
-#define POP_WARNING()
+//#pragma GCC diagnostic ignored "-Wreserved-id-macro"
+//#define DISABLE_UNUSED_PARS _Pargma()
 #endif
 
-#ifdef __cplusplus
-#define NEWNULLPTR	nullptr
-#else
-#define NEWNULLPTR	NULL
-#define STATIC_CAST(_Type,value) (_Type)(value)
-#define CONST_CAST(_Type,value)  PUSH_WARNING("-Wcast-qual")  (_Type)(value) POP_WARNING()
-#define REINTERPRET_CAST(_Type,value) (_Type)(value)
+#ifndef	_GNU_SOURCE
+#define _GNU_SOURCE
 #endif
 
-#define DUMP_NOT_USED_ARGS(...)
+#include <stdio.h>
+#include <stdlib.h>
+#include <malloc.h>
+#include <crash_investigator.h>
+#include <unistd.h>
+#ifndef _GNU_SOURCE
+#endif
+#include <dlfcn.h>
+#include <pthread.h>
+#include <execinfo.h>
 
-#define MAX_NUMBER_OF_DELETED_ITEMS 16384
+#define BACKTRACE_MALLOC_HOOK_BUFFER_SIZE   16384
 
 
 BEGIN_C_DECL_2
 
-static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJustCreatedOrWillBeFreed, size_t a_size, void* a_memoryForRealloc);
+typedef void* (*TypeMalloc)(size_t);
+typedef void* (*TypeRealloc)(void*,size_t);
+typedef void* (*TypeCalloc)(size_t nmemb, size_t size);
+typedef void (*TypeFree)(void*);
+
+static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJustCreatedOrWillBeFreed, size_t a_size, void* a_pMemorForRealloc);
+static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed, void** a_pBacktrace, int32_t a_nStackDeepness);
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
-static BOOL_T_2 CrashInvestigator(enum HookType a_type, void* a_memoryJustCreatedOrWillBeFreed, size_t a_size, void* a_memoryForRealloc){return 1;}
+static BOOL_T_2 UserHookFunction(enum HookType type,void* memoryCreatedOrWillBeFreed, size_t size, void* _memoryForRealloc){return 1;}
 #pragma GCC diagnostic pop
 
-static int s_nHookInited = 0;
-static TypeHookFunction s_MemoryHookFunction = &CrashInvestigator;
-int g_nVerbosity;
+static TypeHookFunction s_MemoryHookFunction = &UserHookFunction;
+static int s_nInitialized = 0;
+static int s_nInitializationStarted = 0;
+static TypeMalloc s_library_malloc = NEWNULLPTR;
+static TypeRealloc s_library_realloc = NEWNULLPTR;
+static TypeCalloc s_library_calloc = NEWNULLPTR;
+static TypeFree s_library_free = NEWNULLPTR;
+static pthread_rwlock_t s_rw_lock = PTHREAD_RWLOCK_INITIALIZER;
+static int s_isFirstCall = 1;
+static int s_isUserRoutineCall = 0;
+static int s_nIsMallocForBacktrace = 0;
+static char s_vcBacktraceSymbolsBuffer[BACKTRACE_MALLOC_HOOK_BUFFER_SIZE];
 
-
-#ifdef _MSC_VER
-
-#include <crtdbg.h>
-#include <WinSock2.h>
-#include <WS2tcpip.h>
-#include <Windows.h>
-
-static _CRT_ALLOC_HOOK s_initialHook = NEWNULLPTR;
-
-// https://github.com/Microsoft/VCSamples/blob/master/VC2010Samples/crt/crt_dbg2/crt_dbg2.c
-// https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/crtsetallochook?view=vs-2017
-static int CRT_ALLOC_HOOK_Static(
-	int a_allocType,                  // _HOOK_ALLOC, _HOOK_REALLOC, and _HOOK_FREE
-	void *a_userData,                 // this is valid in the case of free
-	size_t a_size,                    // size of memory requested 
-	int a_blockType,                  // blockType indicates the type of the memory block ('nBlockUse==_CRT_BLOCK'  internal C runtime library allocations
-	long a_requestNumber,             // requestNumber is the object allocation order number of the memory block ???
-	const unsigned char *a_filename,  // if available filename is the source file name where the triggering allocation operation was initiated
-	int a_lineNumber                  // if available lineNumber specify the line number where the triggering allocation operation was initiated
-)
+static inline BOOL_T_2 InitializeLibrary(void)
 {
-	switch(a_allocType){
-	case _HOOK_ALLOC:
-		CrashAnalizerMemHookFunction(HookTypeMalloc,a_size,(void*)a_requestNumber);
-		break;
-	case _HOOK_REALLOC:
-		break;
-	case _HOOK_FREE:
-		break;
-	default:
-		break;
-	}
-
-	return TRUE;
+    void* pLib = dlopen("libc.so",RTLD_LAZY);
+    s_library_malloc = REINTERPRET_CAST(TypeMalloc,dlsym(pLib, "malloc"));  /* returns the object reference for malloc */
+    s_library_realloc = REINTERPRET_CAST(TypeRealloc,dlsym(RTLD_NEXT, "realloc"));  /* returns the object reference for realloc */
+    s_library_calloc = REINTERPRET_CAST(TypeCalloc,dlsym(RTLD_NEXT, "calloc"));  /* returns the object reference for calloc */
+    s_library_free = REINTERPRET_CAST(TypeFree,dlsym(RTLD_NEXT, "free"));  /* returns the object reference for free */
+    if((!s_library_malloc)||(!s_library_realloc)||(!s_library_calloc)||(!s_library_free)){
+        return 0;
+    }
+    s_nInitialized = 1;
+    return 1;
 }
 
 
-void InitializeCrashAnalizer(void)
+#if 1
+void* malloc(size_t a_size)
 {
-	if (!s_nHookInited) {
-		s_initialHook = _CrtSetAllocHook(&CRT_ALLOC_HOOK_Static);
-		s_nHookInited = 1;
-	}
+    void* pReturn = NEWNULLPTR;
+
+    if(s_nIsMallocForBacktrace){
+        if(a_size<=BACKTRACE_MALLOC_HOOK_BUFFER_SIZE){
+            return s_vcBacktraceSymbolsBuffer;
+        }
+        else{
+            return NEWNULLPTR;
+        }
+    }
+
+    if(!s_isFirstCall){
+        pReturn = (*s_library_malloc)(a_size);
+        if(s_isUserRoutineCall){
+            CrashAnalizerMemHookFunction(HookTypeMallocC,pReturn,a_size,NEWNULLPTR);
+        }
+        return pReturn;
+    }
+
+    pthread_rwlock_wrlock(&s_rw_lock);/*////////////////////////////////////////////////*/
+    s_isFirstCall = 0;
+    if(!s_nInitialized){
+        if(s_nInitializationStarted){
+            //
+        }
+        if(!InitializeLibrary()){
+            goto returnPoint;
+        }
+        s_nInitialized = 1;
+    }
+
+    pReturn = (*s_library_malloc)(a_size);
+    CrashAnalizerMemHookFunction(HookTypeMallocC,pReturn,a_size,NEWNULLPTR);
+
+returnPoint:
+    s_isFirstCall = 1;
+    pthread_rwlock_unlock(&s_rw_lock);/*////////////////////////////////////////////////*/
+    return pReturn;
+}
+#else
+
+static int sisRecursing = 0;
+
+void* malloc(size_t a_size)
+{
+    static void* (*my_malloc)(size_t) = NULL;
+    int isRec = sisRecursing;
+    sisRecursing = 1;
+    if (!my_malloc)
+    my_malloc = (TypeMalloc)dlsym(RTLD_NEXT, "malloc");  /* returns the object reference for malloc */
+    void *p = my_malloc(a_size);               /* call malloc() using function pointer my_malloc */
+    //if(!isRec)printf("malloc(%d) = %p\n", (int)a_size, p);
+    sisRecursing = isRec;
+    return p;
 }
 
-
-void CleanupCrashAnalizer(void)
-{
-	if (s_nHookInited) {
-		_CrtSetAllocHook(s_initialHook);
-		s_nHookInited = 0;
-	}
-}
-
-
-#elif defined(__GNUC__)
-
-//#pragma GCC diagnostic ignored "-Wcast-qual"
-#define GRANULARITY                 24
-static const int GRANULARITY_MIN1 = GRANULARITY - 1;
-
-#ifndef weak_variable
-#define weak_variable
 #endif
 
-// https://github.com/lattera/glibc/blob/master/malloc/malloc.c
-// there is no calloc hook, thats why always calloc will be done in the case of malloc
-
-extern void *weak_variable (*__malloc_hook) (size_t __size, const void *);
-extern void *weak_variable (*__realloc_hook) (void *__ptr, size_t __size, const void *);
-extern void  weak_variable (*__free_hook) (void *__ptr,const void *);
-
-static void * (*__malloc_hook_initial) (size_t __size, const void *) = NEWNULLPTR;
-static void * (*__realloc_hook_initial) (void *__ptr,size_t __size, const void *) = NEWNULLPTR;
-static void   (*__free_hook_initial) (void *__ptr, const void *) = NEWNULLPTR;
-
-static void * my_malloc_hook_static2(size_t a_size, const void * a_nextMem);
-static void * my_realloc_hook_static2(void *a_ptr, size_t a_size, const void * a_nextMem);
-static void   my_free_hook_static2(void *a_ptr, const void * a_nextMem);
-
-static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed, void** a_pBacktrace, int32_t a_nStackDeepness);
-
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-static void * my_malloc_hook_static_raw(size_t a_size, const void * a_nextMem)
+#if 0
+void* calloc(size_t a_nmemb, size_t a_size)
 {
-#pragma GCC diagnostic pop
-    void* pReturn;
+    void* pReturn = NEWNULLPTR;
 
-    __malloc_hook = __malloc_hook_initial;
-    __realloc_hook = __realloc_hook_initial;
-    __free_hook = __free_hook_initial;
-    //pReturn = calloc(((a_size+GRANULARITY_MIN1)/GRANULARITY)*GRANULARITY,1);
-    pReturn = malloc(((a_size+GRANULARITY_MIN1)/GRANULARITY)*GRANULARITY);
-    CrashAnalizerMemHookFunction(HookTypeCallocC,pReturn,a_size,NEWNULLPTR);
-    __malloc_hook = &my_malloc_hook_static2;
-    __realloc_hook = &my_realloc_hook_static2;
-    __free_hook = &my_free_hook_static2;
+    if(!s_isFirstCall){
+        if(!s_nInitialized){
+            if(!InitializeLibrary()){
+                goto returnPoint;
+            }
+            s_nInitialized = 1;
+        }
+
+        pReturn = (*s_library_calloc)(a_nmemb,a_size);
+        if(s_isUserRoutineCall){
+            CrashAnalizerMemHookFunction(HookTypeMallocC,pReturn,a_size,NEWNULLPTR);
+        }
+        return pReturn;
+    }
+
+    pthread_rwlock_wrlock(&s_rw_lock);/*////////////////////////////////////////////////*/
+    s_isFirstCall = 0;
+    if(!s_nInitialized){
+        if(!InitializeLibrary()){
+            goto returnPoint;
+        }
+        s_nInitialized = 1;
+    }
+
+    pReturn = (*s_library_calloc)(a_nmemb,a_size);
+    CrashAnalizerMemHookFunction(HookTypeReallocC,pReturn,a_size,NEWNULLPTR);
+
+returnPoint:
+    s_isFirstCall = 1;
+    pthread_rwlock_unlock(&s_rw_lock);/*////////////////////////////////////////////////*/
     return pReturn;
 }
 
+#endif
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-static void * my_realloc_hook_static_raw(void *a_ptr, size_t a_size, const void * a_nextMem)
+
+void* realloc(void *a_ptr, size_t a_size)
 {
-#pragma GCC diagnostic pop
-    void* pReturn;
+    void* pReturn = NEWNULLPTR;
 
-    __malloc_hook = __malloc_hook_initial;
-    __realloc_hook = __realloc_hook_initial;
-    __free_hook = __free_hook_initial;
-    pReturn = realloc(a_ptr,((a_size+GRANULARITY_MIN1)/GRANULARITY)*GRANULARITY);
+    if(!s_isFirstCall){
+        pReturn = (*s_library_realloc)(a_ptr,a_size);
+        if(s_isUserRoutineCall){
+            CrashAnalizerMemHookFunction(HookTypeMallocC,pReturn,a_size,NEWNULLPTR);
+        }
+        return pReturn;
+    }
+
+    pthread_rwlock_wrlock(&s_rw_lock);/*////////////////////////////////////////////////*/
+    s_isFirstCall = 0;
+    if(!s_nInitialized){
+        s_library_malloc = REINTERPRET_CAST(TypeMalloc,dlsym(RTLD_NEXT, "malloc"));  /* returns the object reference for malloc */
+        s_library_realloc = REINTERPRET_CAST(TypeRealloc,dlsym(RTLD_NEXT, "realloc"));  /* returns the object reference for realloc */
+        s_library_calloc = REINTERPRET_CAST(TypeCalloc,dlsym(RTLD_NEXT, "calloc"));  /* returns the object reference for calloc */
+        s_library_free = REINTERPRET_CAST(TypeFree,dlsym(RTLD_NEXT, "free"));  /* returns the object reference for free */
+        if((!s_library_malloc)||(!s_library_realloc)||(!s_library_calloc)||(!s_library_free)){
+            goto returnPoint;
+        }
+        s_nInitialized = 1;
+    }
+
+    pReturn = (*s_library_realloc)(a_ptr,a_size);
     CrashAnalizerMemHookFunction(HookTypeReallocC,pReturn,a_size,a_ptr);
-    __malloc_hook = &my_malloc_hook_static2;
-    __realloc_hook = &my_realloc_hook_static2;
-    __free_hook = &my_free_hook_static2;
-    return pReturn;
-}
 
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-static void   my_free_hook_static_raw(void *a_ptr, const void * a_nextMem)
-{
-#pragma GCC diagnostic pop
-    __malloc_hook = __malloc_hook_initial;
-    __realloc_hook = __realloc_hook_initial;
-    __free_hook = __free_hook_initial;
-    CrashAnalizerMemHookFunction(HookTypeFreeC,a_ptr,0,NEWNULLPTR);
-    free(a_ptr);
-    __malloc_hook = &my_malloc_hook_static2;
-    __realloc_hook = &my_realloc_hook_static2;
-    __free_hook = &my_free_hook_static2;
-}
-
-static void * my_malloc_hook_static2(size_t a_size, const void * a_nextMem)
-{
-    void* pReturn;
-    pthread_rwlock_wrlock(&s_rw_lock);/*////////////////////////////////////////////////*/
-    pReturn = my_malloc_hook_static_raw(a_size, a_nextMem);
+returnPoint:
+    s_isFirstCall = 1;
     pthread_rwlock_unlock(&s_rw_lock);/*////////////////////////////////////////////////*/
     return pReturn;
 }
 
-
-static void * my_realloc_hook_static2(void *a_ptr, size_t a_size, const void * a_nextMem)
+#if 0
+void free(void *a_ptr)
 {
-    void* pReturn;
-    pthread_rwlock_wrlock(&s_rw_lock);/*////////////////////////////////////////////////*/
-    pReturn = my_realloc_hook_static_raw(a_ptr,a_size,a_nextMem);
-    pthread_rwlock_unlock(&s_rw_lock);/*////////////////////////////////////////////////*/
-    return pReturn;
-}
+    if(!s_isFirstCall){
+        if(s_isUserRoutineCall){
+            CrashAnalizerMemHookFunction(HookTypeMallocC,a_ptr,0,NEWNULLPTR);
+        }
+        (*s_library_free)(a_ptr);
+        return;
+    }
 
-
-static void   my_free_hook_static2(void *a_ptr, const void * a_nextMem)
-{
     pthread_rwlock_wrlock(&s_rw_lock);/*////////////////////////////////////////////////*/
-    my_free_hook_static_raw(a_ptr,a_nextMem);
+    s_isFirstCall = 0;
+    if(!s_nInitialized){
+        s_library_malloc = REINTERPRET_CAST(TypeMalloc,dlsym(RTLD_NEXT, "malloc"));  /* returns the object reference for malloc */
+        s_library_realloc = REINTERPRET_CAST(TypeRealloc,dlsym(RTLD_NEXT, "realloc"));  /* returns the object reference for realloc */
+        s_library_calloc = REINTERPRET_CAST(TypeCalloc,dlsym(RTLD_NEXT, "calloc"));  /* returns the object reference for calloc */
+        s_library_free = REINTERPRET_CAST(TypeFree,dlsym(RTLD_NEXT, "free"));  /* returns the object reference for free */
+        if((!s_library_malloc)||(!s_library_realloc)||(!s_library_calloc)||(!s_library_free)){
+            goto returnPoint;
+        }
+        s_nInitialized = 1;
+    }
+
+    (*s_library_free)(a_ptr);
+    CrashAnalizerMemHookFunction(HookTypeReallocC,a_ptr,0,NEWNULLPTR);
+
+returnPoint:
+    s_isFirstCall = 1;
     pthread_rwlock_unlock(&s_rw_lock);/*////////////////////////////////////////////////*/
 }
+#endif
+
 
 
 void InitializeCrashAnalizer(void)
 {
-    if(!s_nHookInited){
-        s_nHookInited = 1;
-
-        pthread_rwlock_init(&s_rw_lock,NEWNULLPTR);
-
-        __malloc_hook_initial = __malloc_hook;
-        __realloc_hook_initial = __realloc_hook;
-        __free_hook_initial = __free_hook;
-
-        __malloc_hook=&my_malloc_hook_static2;
-        __realloc_hook=&my_realloc_hook_static2;
-        __free_hook = &my_free_hook_static2;
+    if(!s_nInitialized){
+        s_library_malloc = REINTERPRET_CAST(TypeMalloc,dlsym(RTLD_NEXT, "malloc"));  /* returns the object reference for malloc */
+        s_library_realloc = REINTERPRET_CAST(TypeRealloc,dlsym(RTLD_NEXT, "realloc"));  /* returns the object reference for realloc */
+        s_library_calloc = REINTERPRET_CAST(TypeCalloc,dlsym(RTLD_NEXT, "calloc"));  /* returns the object reference for calloc */
+        s_library_free = REINTERPRET_CAST(TypeFree,dlsym(RTLD_NEXT, "free"));  /* returns the object reference for free */
+        if((!s_library_malloc)||(!s_library_realloc)||(!s_library_calloc)||(!s_library_free)){
+            return;
+        }
+        s_nInitialized = 1;
     }
 }
 
 void CleanupCrashAnalizer(void)
 {
-    if(s_nHookInited){
-        s_nHookInited = 0;
-
-        pthread_rwlock_destroy(&s_rw_lock);
-
-        __malloc_hook=__malloc_hook_initial;
-        __realloc_hook=__realloc_hook_initial;
-        __free_hook = __free_hook_initial;
-    }
 }
 
 
@@ -269,7 +280,6 @@ TypeHookFunction SetMemoryInvestigator(TypeHookFunction a_newFnc)
     return fpRet;
 }
 
-#endif  // #elif defined(__GNUC__)
 
 
 /*///////////////////////////////////////////////////////////////////////////////////////////////////////*/
@@ -353,24 +363,16 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
 {
     // enum MemoryType {createdByMalloc,createdByNew, createdByNewArray};
     // enum HookType {HookTypeMallocC, HookTypeCallocC, HookTypeReallocC, HookTypeFreeC,HookTypeNewCpp,HookTypeDeleteCpp,HookTypeNewArrayCpp,HookTypeDeleteArrayCpp};
-    static int snRecursing = 0;
     static void *svBacktrace[STACK_MAX_SIZE];
     struct SMemoryItem* pItem=NEWNULLPTR;
     int32_t nFailedBacktraceSize;
-    int nRecr = snRecursing;
+    int nIsFirstCall = s_isFirstCall;
     BOOL_T_2 bContinue;
 
-    snRecursing = 1;
-    if(!nRecr){
-        __malloc_hook=&my_malloc_hook_static_raw;
-        __realloc_hook=&my_realloc_hook_static_raw;
-        __free_hook = &my_free_hook_static_raw;
+    if(!nIsFirstCall){
         bContinue = (*s_MemoryHookFunction)(a_type,a_memoryJustCreatedOrWillBeFreed,a_size,a_pMemorForRealloc);
-        __malloc_hook = __malloc_hook_initial;
-        __realloc_hook = __realloc_hook_initial;
-        __free_hook = __free_hook_initial;
         if(!bContinue){
-            goto returnPoint;
+            return;
         }
     }
 
@@ -389,7 +391,7 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
     case HookTypeMallocC: case HookTypeCallocC: case HookTypeReallocC:
         pItem = STATIC_CAST(struct SMemoryItem*,malloc(sizeof(struct SMemoryItem*)));
         if(!pItem){
-            goto returnPoint;
+            return;
         }
         pItem->stackDeepCrt=pItem->stackDeepDel = 0;
         pItem->stackDeepCrt = backtrace(pItem->vBacktraceCrt,STACK_MAX_SIZE);
@@ -401,7 +403,7 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
             fprintf(stderr, "!!!!!! Trying to delete non existing memory!\n");
             nFailedBacktraceSize = backtrace(svBacktrace,STACK_MAX_SIZE);
             AnalizeBadMemoryCase(a_memoryJustCreatedOrWillBeFreed,svBacktrace,nFailedBacktraceSize);
-            goto returnPoint;
+            return;
         }
         RemoveSMemoryItemFromList(pItem,&s_existing);
         pItem->stackDeepDel = backtrace(pItem->vBacktraceDel,STACK_MAX_SIZE);
@@ -413,9 +415,6 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
     default:
         break;
     }
-
-returnPoint:
-    snRecursing = nRecr;
 
 }
 
@@ -519,37 +518,17 @@ analizePoint:
 
 }
 
-#define BACKTRACE_MALLOC_HOOK_BUFFER_SIZE   16384
-static char s_vcBacktraceSymbolsBuffer[BACKTRACE_MALLOC_HOOK_BUFFER_SIZE];
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-static void * malloc_hook_for_backtrace(size_t a_size, const void * a_nextMem)
-{
-    return a_size<=BACKTRACE_MALLOC_HOOK_BUFFER_SIZE ? s_vcBacktraceSymbolsBuffer : NEWNULLPTR;
-}
-static void * realloc_hook_for_backtrace(void *a_ptr, size_t a_size, const void * a_nextMem)
-{
-    return a_size<=BACKTRACE_MALLOC_HOOK_BUFFER_SIZE ? s_vcBacktraceSymbolsBuffer : NEWNULLPTR;
-}
-static void   free_hook_for_backtrace(void *a_ptr, const void * a_nextMem)
-{
-    //
-}
-#pragma GCC diagnostic pop
+
 
 
 static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepness)
 {
     if(a_nStackDeepness>0){
         char** ppSymbols;
-        __malloc_hook = &malloc_hook_for_backtrace;
-        __realloc_hook = &realloc_hook_for_backtrace;
-        __free_hook = &free_hook_for_backtrace;
+        s_nIsMallocForBacktrace = 1;
         ppSymbols = backtrace_symbols(a_pBacktrace,a_nStackDeepness);
-        __malloc_hook=__malloc_hook_initial;
-        __realloc_hook=__realloc_hook_initial;
-        __free_hook = __free_hook_initial;
+        s_nIsMallocForBacktrace = 0;
         if(ppSymbols){
             for(int32_t i=0; i<a_nStackDeepness; ++i)
             {
@@ -561,3 +540,5 @@ static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepn
 
 
 END_C_DECL_2
+
+#endif // #if 0
