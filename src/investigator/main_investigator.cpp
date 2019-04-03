@@ -21,6 +21,7 @@
 #ifndef _GNU_SOURCE
 #endif
 #include <dlfcn.h>
+#include <pthread.h>
 
 static BOOL_T_2 HookFunctionStatic(enum HookType,void*, size_t a_size, void*)
 //static BOOL_T_2 HookFunctionStatic(enum HookType,void*, size_t , void*)
@@ -29,12 +30,16 @@ static BOOL_T_2 HookFunctionStatic(enum HookType,void*, size_t a_size, void*)
     return 1;
 }
 
+static pthread_rwlock_t rwLock = PTHREAD_RWLOCK_INITIALIZER;
+
 int main()
 {
+    pthread_rwlock_wrlock(&rwLock);
+    pthread_rwlock_unlock(&rwLock);
     //usleep(10000000);
-    InitializeCrashAnalizer();
-    SetMemoryInvestigator(&HookFunctionStatic);
-    //printf("Crash analizer test!\n");
+    //InitializeCrashAnalizer();
+    //SetMemoryInvestigator(&HookFunctionStatic);
+    printf("Crash analizer test!\n");
     //printf("Crash analizer test!\n");
     void* pMemory = malloc(100);
     free(pMemory);

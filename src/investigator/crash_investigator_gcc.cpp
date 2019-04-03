@@ -23,7 +23,7 @@
 #include <execinfo.h>
 
 #define DUMP_NOT_USED_ARGS(...)
-#define GRANULARITY                 1024
+#define GRANULARITY                 1
 #define STACK_MAX_SIZE  256
 
 #ifndef weak_variable
@@ -32,6 +32,26 @@
 
 
 BEGIN_C_DECL_2
+
+//#define INTERNAL_BUFFER_REALLOC_SIZE   16384
+//static size_t s_nInternalBufferSize = 0;
+//static char* s_pcInternalBuffer = NEWNULLPTR;
+struct SMemoryItem{
+    struct SMemoryItem *prev, *next;
+    void *vBacktraceCrt[STACK_MAX_SIZE], *vBacktraceDel[STACK_MAX_SIZE];
+    int32_t stackDeepCrt, stackDeepDel;
+    char* startingAddress2;
+    size_t size2;
+    enum MemoryType type;
+    int reserved;
+};
+
+typedef void *weak_variable (*Type_malloc_hook) (size_t __size, const void *);
+typedef void *weak_variable (*Type_realloc_hook) (void *__ptr, size_t __size, const void *);
+typedef void  weak_variable (*Type_free_hook) (void *__ptr,const void *);
+
+static struct SMemoryItemList{struct SMemoryItem * first, *last;} s_existing={NEWNULLPTR,NEWNULLPTR}, s_deleted={NEWNULLPTR,NEWNULLPTR};
+static int s_nSizeInDeleted = 0;
 
 static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed, void** a_pBacktrace, int32_t a_nStackDeepness);
 static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJustCreatedOrWillBeFreed, size_t a_size, void* a_memoryForRealloc);
@@ -42,10 +62,6 @@ static BOOL_T_2 CrashInvestigator(enum HookType a_type, void* a_memoryJustCreate
 
 // https://github.com/lattera/glibc/blob/master/malloc/malloc.c
 // there is no calloc hook, thats why always calloc will be done in the case of malloc
-
-typedef void *weak_variable (*Type_malloc_hook) (size_t __size, const void *);
-typedef void *weak_variable (*Type_realloc_hook) (void *__ptr, size_t __size, const void *);
-typedef void  weak_variable (*Type_free_hook) (void *__ptr,const void *);
 
 extern void *weak_variable (*__malloc_hook) (size_t __size, const void *);
 extern void *weak_variable (*__realloc_hook) (void *__ptr, size_t __size, const void *);
@@ -63,8 +79,9 @@ static const int GRANULARITY_MIN1 = GRANULARITY - 1;
 static int s_nHookInited = 0;
 static TypeHookFunction s_MemoryHookFunction = &CrashInvestigator;
 static pthread_rwlock_t s_rw_lock = PTHREAD_RWLOCK_INITIALIZER;
+static int snRecursing = 0;
 
-
+#include <memory.h>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -76,8 +93,20 @@ static void * my_malloc_hook_static_raw(size_t a_size, const void * a_nextMem)
     __malloc_hook = s_malloc_hook_initial_c;
     __realloc_hook = s_realloc_hook_initial_c;
     __free_hook = s_free_hook_initial;
-    pReturn = calloc(((a_size+GRANULARITY_MIN1)/GRANULARITY)*GRANULARITY,1);
-    //pReturn = malloc(((a_size+GRANULARITY_MIN1)/GRANULARITY)*GRANULARITY);
+    //pReturn = calloc(((a_size+GRANULARITY_MIN1)/GRANULARITY)*GRANULARITY,1);
+    pReturn = malloc(((a_size+GRANULARITY_MIN1)/GRANULARITY)*GRANULARITY);
+    if( (!snRecursing) && pReturn){
+        memset(pReturn,0,a_size);
+#if 0
+        char* pcToZero = STATIC_CAST(char*,pReturn);
+        for(size_t i=0; i<a_size;++i){
+            if(&pcToZero[i]==REINTERPRET_CAST(char*,s_existing.first)){
+                break;
+            }
+            pcToZero[i]=0;
+        }
+#endif
+    }
     CrashAnalizerMemHookFunction(HookTypeCallocC,pReturn,a_size,NEWNULLPTR);
     __malloc_hook = &my_malloc_hook_static2;
     __realloc_hook = &my_realloc_hook_static2;
@@ -182,27 +211,6 @@ TypeHookFunction SetMemoryInvestigator(TypeHookFunction a_newFnc)
 
 /*///////////////////////////////////////////////////////////////////////////////////////////////////////*/
 
-
-
-//#define INTERNAL_BUFFER_REALLOC_SIZE   16384
-//static size_t s_nInternalBufferSize = 0;
-//static char* s_pcInternalBuffer = NEWNULLPTR;
-struct SMemoryItem{
-    struct SMemoryItem *prev, *next;
-    void *vBacktraceCrt[STACK_MAX_SIZE], *vBacktraceDel[STACK_MAX_SIZE];
-    int32_t stackDeepCrt, stackDeepDel;
-    char* startingAddress2;
-    size_t size2;
-    enum MemoryType type;
-    int reserved;
-};
-
-static struct SMemoryItemList{struct SMemoryItem * first, *last;} s_existing={NEWNULLPTR,NEWNULLPTR}, s_deleted={NEWNULLPTR,NEWNULLPTR};
-static int s_nSizeInDeleted = 0;
-
-
-//static void*
-
 static void AddSMemoryItemToList(struct SMemoryItem * a_pItem, struct SMemoryItemList* a_pList, enum MemoryType a_memoryType, void* a_pMemory, size_t a_unSize)
 {
     // todo: analize here is needed?
@@ -263,7 +271,6 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
 {
     // enum MemoryType {createdByMalloc,createdByNew, createdByNewArray};
     // enum HookType {HookTypeMallocC, HookTypeCallocC, HookTypeReallocC, HookTypeFreeC,HookTypeNewCpp,HookTypeDeleteCpp,HookTypeNewArrayCpp,HookTypeDeleteArrayCpp};
-    static int snRecursing = 0;
     static void *svBacktrace[STACK_MAX_SIZE];
     struct SMemoryItem* pItem=NEWNULLPTR;
     int32_t nFailedBacktraceSize;

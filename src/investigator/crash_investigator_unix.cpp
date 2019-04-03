@@ -16,7 +16,7 @@
   *   - https://ide.geeksforgeeks.org/F10DpiEh8N 
   */
 
-#if 0
+#if 1
 
 #ifdef __GNUC__
 //#pragma GCC diagnostic ignored "-Wreserved-id-macro"
@@ -37,11 +37,29 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <execinfo.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <stdint.h>
+#include <memory.h>
 
 #define BACKTRACE_MALLOC_HOOK_BUFFER_SIZE   16384
+#define MEMOR_TYPE_REGULAR_NO_LOG 0
+#define MEMOR_TYPE_REGULAR 1
+#define MEMOR_TYPE_MMAP 2
+#define MEMOR_TYPE_POOL 3
 
 
 BEGIN_C_DECL_2
+
+struct SMemoryHeader{
+    uint64_t size;
+    uint64_t type : 5;
+    uint64_t reserved : 59;
+};
+
+#define FROM_BUFF_TO_HEADER(_buffer) REINTERPRET_CAST(struct SMemoryHeader*,(_buffer))
+#define FROM_USER_BUFF_TO_HEADER(_buffer) REINTERPRET_CAST(struct SMemoryHeader*,STATIC_CAST(char*,_buffer)-sizeof(struct SMemoryHeader))
 
 typedef void* (*TypeMalloc)(size_t);
 typedef void* (*TypeRealloc)(void*,size_t);
@@ -57,171 +75,203 @@ static BOOL_T_2 UserHookFunction(enum HookType type,void* memoryCreatedOrWillBeF
 
 static TypeHookFunction s_MemoryHookFunction = &UserHookFunction;
 static int s_nInitialized = 0;
-static int s_nInitializationStarted = 0;
+static int s_nMemoryAllocationType = 0;  // regular=0, mmap=1, localPool=2
 static TypeMalloc s_library_malloc = NEWNULLPTR;
 static TypeRealloc s_library_realloc = NEWNULLPTR;
 static TypeCalloc s_library_calloc = NEWNULLPTR;
 static TypeFree s_library_free = NEWNULLPTR;
 static pthread_rwlock_t s_rw_lock = PTHREAD_RWLOCK_INITIALIZER;
-static int s_isFirstCall = 1;
-static int s_isUserRoutineCall = 0;
-static int s_nIsMallocForBacktrace = 0;
+static int s_shouldBeLocked = 1;
+//static int s_isUserRoutineCall = 0;
+static void* s_pLibC = NEWNULLPTR;
 static char s_vcBacktraceSymbolsBuffer[BACKTRACE_MALLOC_HOOK_BUFFER_SIZE];
+
+#define PRE_LAST_SYMBOL_INDEX   8
+#define LAST_SYMBOL_INDEX       9
 
 static inline BOOL_T_2 InitializeLibrary(void)
 {
-    void* pLib = dlopen("libc.so",RTLD_LAZY);
-    s_library_malloc = REINTERPRET_CAST(TypeMalloc,dlsym(pLib, "malloc"));  /* returns the object reference for malloc */
-    s_library_realloc = REINTERPRET_CAST(TypeRealloc,dlsym(RTLD_NEXT, "realloc"));  /* returns the object reference for realloc */
-    s_library_calloc = REINTERPRET_CAST(TypeCalloc,dlsym(RTLD_NEXT, "calloc"));  /* returns the object reference for calloc */
-    s_library_free = REINTERPRET_CAST(TypeFree,dlsym(RTLD_NEXT, "free"));  /* returns the object reference for free */
-    if((!s_library_malloc)||(!s_library_realloc)||(!s_library_calloc)||(!s_library_free)){
+    int nMemoryAllocationType = s_nMemoryAllocationType;
+    char lastSymb, preLastSymb;;
+    char vcLibCName[32] = "libc.so.6X";
+
+    if(s_nInitialized && s_pLibC){
+        return 1;
+    }
+
+    s_nMemoryAllocationType = MEMOR_TYPE_MMAP;
+
+    s_pLibC = dlopen("libc.so",RTLD_LAZY);
+    vcLibCName[LAST_SYMBOL_INDEX] = 0;
+    for(preLastSymb='0';(preLastSymb<='9')&&(!s_pLibC);++preLastSymb){
+        vcLibCName[PRE_LAST_SYMBOL_INDEX] = preLastSymb;
+        s_pLibC = dlopen(vcLibCName,RTLD_LAZY);
+    }
+
+    for(preLastSymb='0';(preLastSymb<='9')&&(!s_pLibC);++preLastSymb){
+        vcLibCName[PRE_LAST_SYMBOL_INDEX] = preLastSymb;
+        for(lastSymb='0';(lastSymb<='9')&&(!s_pLibC);++lastSymb){
+            vcLibCName[LAST_SYMBOL_INDEX] = lastSymb;
+            s_pLibC = dlopen(vcLibCName,RTLD_LAZY);
+        }
+
+    }
+    if(!s_pLibC){
+        s_nMemoryAllocationType = nMemoryAllocationType;
         return 0;
     }
+    s_library_malloc = REINTERPRET_CAST(TypeMalloc,dlsym(s_pLibC, "malloc"));  /* returns the object reference for malloc */
+    s_library_realloc = REINTERPRET_CAST(TypeRealloc,dlsym(s_pLibC, "realloc"));  /* returns the object reference for realloc */
+    s_library_calloc = REINTERPRET_CAST(TypeCalloc,dlsym(s_pLibC, "calloc"));  /* returns the object reference for calloc */
+    s_library_free = REINTERPRET_CAST(TypeFree,dlsym(s_pLibC, "free"));  /* returns the object reference for free */
+    if((!s_library_malloc)||(!s_library_realloc)||(!s_library_calloc)||(!s_library_free)){
+        s_nMemoryAllocationType = nMemoryAllocationType;
+        return 0;
+    }
+    s_nMemoryAllocationType = nMemoryAllocationType;
     s_nInitialized = 1;
     return 1;
 }
 
 
-#if 1
-void* malloc(size_t a_size)
+static inline void* malloc_static (size_t a_size, enum HookType a_type)
 {
-    void* pReturn = NEWNULLPTR;
+    int nMemoryAllocationType=s_nMemoryAllocationType;
+    int shouldBeLocked = s_shouldBeLocked;
+    struct SMemoryHeader* pHeader;
+    char* pcReturn = NEWNULLPTR;
+    size_t unAllocSize = a_size+sizeof(struct SMemoryHeader);
 
-    if(s_nIsMallocForBacktrace){
-        if(a_size<=BACKTRACE_MALLOC_HOOK_BUFFER_SIZE){
-            return s_vcBacktraceSymbolsBuffer;
+    s_shouldBeLocked = 0;
+
+    if(shouldBeLocked){
+        pthread_rwlock_wrlock(&s_rw_lock);
+    }
+
+
+    switch(nMemoryAllocationType){
+    case MEMOR_TYPE_REGULAR_NO_LOG: case MEMOR_TYPE_REGULAR:
+    {
+        if(!InitializeLibrary()){
+            goto returnPoint;
+        }
+        pcReturn = STATIC_CAST(char*,(*s_library_malloc)(unAllocSize));
+        if(s_nMemoryAllocationType==MEMOR_TYPE_REGULAR){
+            CrashAnalizerMemHookFunction(a_type,pcReturn+sizeof(struct SMemoryHeader),a_size,NEWNULLPTR);
+        }
+        goto returnPoint;
+    }
+    case MEMOR_TYPE_MMAP:
+    {
+        int fd = open("/dev/zero", O_RDWR);
+        if(!fd){goto returnPoint;}
+        pcReturn = STATIC_CAST(char*, mmap(NEWNULLPTR, unAllocSize, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd, 0));
+        close(fd);
+        goto returnPoint;
+    }
+    case MEMOR_TYPE_POOL:
+    {
+        if(unAllocSize<=BACKTRACE_MALLOC_HOOK_BUFFER_SIZE){
+            pcReturn = s_vcBacktraceSymbolsBuffer;
+            goto returnPoint;
         }
         else{
-            return NEWNULLPTR;
-        }
-    }
-
-    if(!s_isFirstCall){
-        pReturn = (*s_library_malloc)(a_size);
-        if(s_isUserRoutineCall){
-            CrashAnalizerMemHookFunction(HookTypeMallocC,pReturn,a_size,NEWNULLPTR);
-        }
-        return pReturn;
-    }
-
-    pthread_rwlock_wrlock(&s_rw_lock);/*////////////////////////////////////////////////*/
-    s_isFirstCall = 0;
-    if(!s_nInitialized){
-        if(s_nInitializationStarted){
-            //
-        }
-        if(!InitializeLibrary()){
             goto returnPoint;
         }
-        s_nInitialized = 1;
+    }
+    default:
+        break;
     }
 
-    pReturn = (*s_library_malloc)(a_size);
-    CrashAnalizerMemHookFunction(HookTypeMallocC,pReturn,a_size,NEWNULLPTR);
 
 returnPoint:
-    s_isFirstCall = 1;
-    pthread_rwlock_unlock(&s_rw_lock);/*////////////////////////////////////////////////*/
-    return pReturn;
-}
-#else
+    if(pcReturn){
+        pHeader=FROM_BUFF_TO_HEADER(pcReturn);
+        pHeader->type = STATIC_CAST(uint64_t,nMemoryAllocationType);
+        pHeader->size = a_size;
+        pcReturn += sizeof(struct SMemoryHeader);
+    }
 
-static int sisRecursing = 0;
+    s_shouldBeLocked = shouldBeLocked;
+
+    if(shouldBeLocked){
+        pthread_rwlock_unlock(&s_rw_lock);
+    }
+
+    return pcReturn;
+}
+
 
 void* malloc(size_t a_size)
 {
-    static void* (*my_malloc)(size_t) = NULL;
-    int isRec = sisRecursing;
-    sisRecursing = 1;
-    if (!my_malloc)
-    my_malloc = (TypeMalloc)dlsym(RTLD_NEXT, "malloc");  /* returns the object reference for malloc */
-    void *p = my_malloc(a_size);               /* call malloc() using function pointer my_malloc */
-    //if(!isRec)printf("malloc(%d) = %p\n", (int)a_size, p);
-    sisRecursing = isRec;
-    return p;
+    return malloc_static(a_size,HookTypeMallocC);
 }
 
-#endif
-
-#if 0
 void* calloc(size_t a_nmemb, size_t a_size)
 {
-    void* pReturn = NEWNULLPTR;
-
-    if(!s_isFirstCall){
-        if(!s_nInitialized){
-            if(!InitializeLibrary()){
-                goto returnPoint;
-            }
-            s_nInitialized = 1;
-        }
-
-        pReturn = (*s_library_calloc)(a_nmemb,a_size);
-        if(s_isUserRoutineCall){
-            CrashAnalizerMemHookFunction(HookTypeMallocC,pReturn,a_size,NEWNULLPTR);
-        }
-        return pReturn;
+    void* pReturn = malloc_static(a_nmemb*a_size,HookTypeCallocC);
+    if(pReturn){
+        memset(pReturn,0,a_size);
     }
-
-    pthread_rwlock_wrlock(&s_rw_lock);/*////////////////////////////////////////////////*/
-    s_isFirstCall = 0;
-    if(!s_nInitialized){
-        if(!InitializeLibrary()){
-            goto returnPoint;
-        }
-        s_nInitialized = 1;
-    }
-
-    pReturn = (*s_library_calloc)(a_nmemb,a_size);
-    CrashAnalizerMemHookFunction(HookTypeReallocC,pReturn,a_size,NEWNULLPTR);
-
-returnPoint:
-    s_isFirstCall = 1;
-    pthread_rwlock_unlock(&s_rw_lock);/*////////////////////////////////////////////////*/
     return pReturn;
 }
-
-#endif
 
 
 void* realloc(void *a_ptr, size_t a_size)
 {
+    int shouldBeLocked = s_shouldBeLocked;
     void* pReturn = NEWNULLPTR;
 
-    if(!s_isFirstCall){
-        pReturn = (*s_library_realloc)(a_ptr,a_size);
-        if(s_isUserRoutineCall){
-            CrashAnalizerMemHookFunction(HookTypeMallocC,pReturn,a_size,NEWNULLPTR);
-        }
-        return pReturn;
+    s_shouldBeLocked = 0;
+
+    if(shouldBeLocked){
+        pthread_rwlock_wrlock(&s_rw_lock);
     }
 
-    pthread_rwlock_wrlock(&s_rw_lock);/*////////////////////////////////////////////////*/
-    s_isFirstCall = 0;
-    if(!s_nInitialized){
-        s_library_malloc = REINTERPRET_CAST(TypeMalloc,dlsym(RTLD_NEXT, "malloc"));  /* returns the object reference for malloc */
-        s_library_realloc = REINTERPRET_CAST(TypeRealloc,dlsym(RTLD_NEXT, "realloc"));  /* returns the object reference for realloc */
-        s_library_calloc = REINTERPRET_CAST(TypeCalloc,dlsym(RTLD_NEXT, "calloc"));  /* returns the object reference for calloc */
-        s_library_free = REINTERPRET_CAST(TypeFree,dlsym(RTLD_NEXT, "free"));  /* returns the object reference for free */
-        if((!s_library_malloc)||(!s_library_realloc)||(!s_library_calloc)||(!s_library_free)){
-            goto returnPoint;
+    pReturn = malloc_static(a_size,HookTypeReallocC);
+
+    if(a_ptr){
+        struct SMemoryHeader* pHeader=FROM_USER_BUFF_TO_HEADER(a_ptr);
+        if(pHeader->size){
+            memcpy(pReturn,a_ptr,pHeader->size);
+            free(a_ptr);
         }
-        s_nInitialized = 1;
     }
 
-    pReturn = (*s_library_realloc)(a_ptr,a_size);
-    CrashAnalizerMemHookFunction(HookTypeReallocC,pReturn,a_size,a_ptr);
-
-returnPoint:
-    s_isFirstCall = 1;
-    pthread_rwlock_unlock(&s_rw_lock);/*////////////////////////////////////////////////*/
+    s_shouldBeLocked=shouldBeLocked;
+    if(shouldBeLocked){
+        pthread_rwlock_unlock(&s_rw_lock);
+    }
     return pReturn;
+
 }
 
-#if 0
+
+
+#if 1
 void free(void *a_ptr)
 {
+    int shouldBeLocked = s_shouldBeLocked;
+    struct SMemoryHeader* pHeader;
+
+    if(!a_ptr){return;}
+
+    pHeader=FROM_USER_BUFF_TO_HEADER(a_ptr);
+    switch(pHeader->type){
+    case MEMOR_TYPE_REGULAR_NO_LOG:
+        CrashAnalizerMemHookFunction(HookTypeFreeC,a_ptr,0,NEWNULLPTR);
+    case MEMOR_TYPE_REGULAR:
+        break;
+    case MEMOR_TYPE_MMAP:
+        munmap(a_ptr,pHeader->size);
+        break;
+    case MEMOR_TYPE_POOL:
+        break;
+    default:
+        break;
+    }
+
+#if 0
     if(!s_isFirstCall){
         if(s_isUserRoutineCall){
             CrashAnalizerMemHookFunction(HookTypeMallocC,a_ptr,0,NEWNULLPTR);
@@ -249,6 +299,7 @@ void free(void *a_ptr)
 returnPoint:
     s_isFirstCall = 1;
     pthread_rwlock_unlock(&s_rw_lock);/*////////////////////////////////////////////////*/
+#endif
 }
 #endif
 
@@ -526,15 +577,16 @@ static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepn
 {
     if(a_nStackDeepness>0){
         char** ppSymbols;
-        s_nIsMallocForBacktrace = 1;
+        s_nDoMallocFromLocalPool = 1;
         ppSymbols = backtrace_symbols(a_pBacktrace,a_nStackDeepness);
-        s_nIsMallocForBacktrace = 0;
         if(ppSymbols){
             for(int32_t i=0; i<a_nStackDeepness; ++i)
             {
                 printf("%s\n",ppSymbols[i]);
             }
         }
+        free(ppSymbols);
+        s_nDoMallocFromLocalPool = 0;
     }
 }
 
