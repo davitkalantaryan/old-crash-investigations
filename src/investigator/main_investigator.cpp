@@ -38,7 +38,7 @@ int main()
     pthread_rwlock_unlock(&rwLock);
     //usleep(10000000);
     //InitializeCrashAnalizer();
-    //SetMemoryInvestigator(&HookFunctionStatic);
+    SetMemoryInvestigator(&HookFunctionStatic);
     printf("Crash analizer test!\n");
     //printf("Crash analizer test!\n");
     void* pMemory = malloc(100);

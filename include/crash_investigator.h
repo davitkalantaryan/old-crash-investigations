@@ -38,10 +38,18 @@
 
 BEGIN_C_DECL_2
 
+
 typedef int BOOL_T_2  ;
 enum MemoryType {CreatedByMalloc,CreatedByNew, CreatedByNewArray};
 enum HookType {HookTypeMallocC, HookTypeCallocC, HookTypeReallocC, HookTypeFreeC,HookTypeNewCpp,HookTypeDeleteCpp,HookTypeNewArrayCpp,HookTypeDeleteArrayCpp};
 typedef BOOL_T_2 (*TypeHookFunction)(enum HookType type,void* memoryCreatedOrWillBeFreed, size_t size, void* _memoryForRealloc);
+
+struct MemoryItem{
+    char* startingAddress;
+    size_t size;
+    enum MemoryType type;
+    int reserved;
+};
 
 
 void InitializeCrashAnalizer(void);

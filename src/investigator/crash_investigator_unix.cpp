@@ -42,12 +42,16 @@
 #include <sys/mman.h>
 #include <stdint.h>
 #include <memory.h>
+#include <signal.h>
 
+#define STACK_MAX_SIZE  256
 #define BACKTRACE_MALLOC_HOOK_BUFFER_SIZE   16384
-#define MEMOR_TYPE_REGULAR_NO_LOG 0
-#define MEMOR_TYPE_REGULAR 1
-#define MEMOR_TYPE_MMAP 2
-#define MEMOR_TYPE_POOL 3
+
+#define MEMOR_TYPE_REGULAR 0
+#define MEMOR_TYPE_INTERNAL 1
+#define MEMOR_TYPE_REGULAR_NO_LOG 2
+#define MEMOR_TYPE_MMAP 3
+#define MEMOR_TYPE_POOL 4
 
 
 BEGIN_C_DECL_2
@@ -65,6 +69,16 @@ typedef void* (*TypeMalloc)(size_t);
 typedef void* (*TypeRealloc)(void*,size_t);
 typedef void* (*TypeCalloc)(size_t nmemb, size_t size);
 typedef void (*TypeFree)(void*);
+typedef void (*TYPE_SIG_HANDLER)(int sigNum, siginfo_t * sigInfo, void * stackInfo);
+
+struct SMemoryItemPrivate{
+    struct MemoryItem userItem;
+    SMemoryItemPrivate *prev, *next;
+    void *vBacktraceCrt[STACK_MAX_SIZE], *vBacktraceDel[STACK_MAX_SIZE];
+    uint64_t isDeleted : 1;
+    uint64_t bitwiseReserved : 63 ;
+    int32_t stackDeepCrt, stackDeepDel;
+};
 
 static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJustCreatedOrWillBeFreed, size_t a_size, void* a_pMemorForRealloc);
 static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed, void** a_pBacktrace, int32_t a_nStackDeepness);
@@ -75,7 +89,7 @@ static BOOL_T_2 UserHookFunction(enum HookType type,void* memoryCreatedOrWillBeF
 
 static TypeHookFunction s_MemoryHookFunction = &UserHookFunction;
 static int s_nInitialized = 0;
-static int s_nMemoryAllocationType = 0;  // regular=0, mmap=1, localPool=2
+static int s_nMemoryAllocationType = MEMOR_TYPE_REGULAR;  // regular=0, mmap=1, localPool=2
 static TypeMalloc s_library_malloc = NEWNULLPTR;
 static TypeRealloc s_library_realloc = NEWNULLPTR;
 static TypeCalloc s_library_calloc = NEWNULLPTR;
@@ -85,13 +99,24 @@ static int s_shouldBeLocked = 1;
 //static int s_isUserRoutineCall = 0;
 static void* s_pLibC = NEWNULLPTR;
 static char s_vcBacktraceSymbolsBuffer[BACKTRACE_MALLOC_HOOK_BUFFER_SIZE];
+static struct sigaction s_sigSegvActionOld;
 
 #define PRE_LAST_SYMBOL_INDEX   8
 #define LAST_SYMBOL_INDEX       9
 
+
+static void SigSegvHandler(int a_nSigNum, siginfo_t * a_pSigInfo, void * a_pStackInfo)
+{
+    int nMemoryAllocationType = s_nMemoryAllocationType;
+    s_nMemoryAllocationType = MEMOR_TYPE_INTERNAL;
+    printf("sigNum=%d, sigInfoPtr=%p, context=%p, faulyAddress=%p\n",a_nSigNum,static_cast<void*>(a_pSigInfo),a_pStackInfo,a_pSigInfo->si_addr);
+    s_nMemoryAllocationType = nMemoryAllocationType;
+}
+
 static inline BOOL_T_2 InitializeLibrary(void)
 {
     int nMemoryAllocationType = s_nMemoryAllocationType;
+    struct sigaction sigAction;
     char lastSymb, preLastSymb;;
     char vcLibCName[32] = "libc.so.6X";
 
@@ -128,6 +153,13 @@ static inline BOOL_T_2 InitializeLibrary(void)
         s_nMemoryAllocationType = nMemoryAllocationType;
         return 0;
     }
+
+    s_nMemoryAllocationType = MEMOR_TYPE_INTERNAL;
+    sigemptyset(&sigAction.sa_mask);
+    sigAction.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigAction.sa_sigaction = (TYPE_SIG_HANDLER)SigSegvHandler;
+    sigaction(SIGSEGV, &sigAction, &s_sigSegvActionOld);
+
     s_nMemoryAllocationType = nMemoryAllocationType;
     s_nInitialized = 1;
     return 1;
@@ -150,6 +182,11 @@ static inline void* malloc_static (size_t a_size, enum HookType a_type)
 
 
     switch(nMemoryAllocationType){
+    case MEMOR_TYPE_INTERNAL:
+    {
+        pcReturn = STATIC_CAST(char*,(*s_library_malloc)(unAllocSize));
+        goto returnPoint;
+    }
     case MEMOR_TYPE_REGULAR_NO_LOG: case MEMOR_TYPE_REGULAR:
     {
         if(!InitializeLibrary()){
@@ -247,23 +284,28 @@ void* realloc(void *a_ptr, size_t a_size)
 }
 
 
-
-#if 1
 void free(void *a_ptr)
 {
+#if 0
     int shouldBeLocked = s_shouldBeLocked;
     struct SMemoryHeader* pHeader;
+
+    if(shouldBeLocked){
+        pthread_rwlock_wrlock(&s_rw_lock);
+    }
 
     if(!a_ptr){return;}
 
     pHeader=FROM_USER_BUFF_TO_HEADER(a_ptr);
+
     switch(pHeader->type){
-    case MEMOR_TYPE_REGULAR_NO_LOG:
-        CrashAnalizerMemHookFunction(HookTypeFreeC,a_ptr,0,NEWNULLPTR);
     case MEMOR_TYPE_REGULAR:
+        CrashAnalizerMemHookFunction(HookTypeFreeC,a_ptr,0,NEWNULLPTR);
+    case MEMOR_TYPE_REGULAR_NO_LOG:
+        (*s_library_free)(pHeader);
         break;
     case MEMOR_TYPE_MMAP:
-        munmap(a_ptr,pHeader->size);
+        munmap(pHeader,pHeader->size);
         break;
     case MEMOR_TYPE_POOL:
         break;
@@ -271,52 +313,19 @@ void free(void *a_ptr)
         break;
     }
 
-#if 0
-    if(!s_isFirstCall){
-        if(s_isUserRoutineCall){
-            CrashAnalizerMemHookFunction(HookTypeMallocC,a_ptr,0,NEWNULLPTR);
-        }
-        (*s_library_free)(a_ptr);
-        return;
+    s_shouldBeLocked=shouldBeLocked;
+    if(shouldBeLocked){
+        pthread_rwlock_unlock(&s_rw_lock);
     }
-
-    pthread_rwlock_wrlock(&s_rw_lock);/*////////////////////////////////////////////////*/
-    s_isFirstCall = 0;
-    if(!s_nInitialized){
-        s_library_malloc = REINTERPRET_CAST(TypeMalloc,dlsym(RTLD_NEXT, "malloc"));  /* returns the object reference for malloc */
-        s_library_realloc = REINTERPRET_CAST(TypeRealloc,dlsym(RTLD_NEXT, "realloc"));  /* returns the object reference for realloc */
-        s_library_calloc = REINTERPRET_CAST(TypeCalloc,dlsym(RTLD_NEXT, "calloc"));  /* returns the object reference for calloc */
-        s_library_free = REINTERPRET_CAST(TypeFree,dlsym(RTLD_NEXT, "free"));  /* returns the object reference for free */
-        if((!s_library_malloc)||(!s_library_realloc)||(!s_library_calloc)||(!s_library_free)){
-            goto returnPoint;
-        }
-        s_nInitialized = 1;
-    }
-
-    (*s_library_free)(a_ptr);
-    CrashAnalizerMemHookFunction(HookTypeReallocC,a_ptr,0,NEWNULLPTR);
-
-returnPoint:
-    s_isFirstCall = 1;
-    pthread_rwlock_unlock(&s_rw_lock);/*////////////////////////////////////////////////*/
 #endif
+
 }
-#endif
 
 
 
 void InitializeCrashAnalizer(void)
 {
-    if(!s_nInitialized){
-        s_library_malloc = REINTERPRET_CAST(TypeMalloc,dlsym(RTLD_NEXT, "malloc"));  /* returns the object reference for malloc */
-        s_library_realloc = REINTERPRET_CAST(TypeRealloc,dlsym(RTLD_NEXT, "realloc"));  /* returns the object reference for realloc */
-        s_library_calloc = REINTERPRET_CAST(TypeCalloc,dlsym(RTLD_NEXT, "calloc"));  /* returns the object reference for calloc */
-        s_library_free = REINTERPRET_CAST(TypeFree,dlsym(RTLD_NEXT, "free"));  /* returns the object reference for free */
-        if((!s_library_malloc)||(!s_library_realloc)||(!s_library_calloc)||(!s_library_free)){
-            return;
-        }
-        s_nInitialized = 1;
-    }
+    InitializeLibrary();
 }
 
 void CleanupCrashAnalizer(void)
@@ -332,52 +341,40 @@ TypeHookFunction SetMemoryInvestigator(TypeHookFunction a_newFnc)
 }
 
 
-
 /*///////////////////////////////////////////////////////////////////////////////////////////////////////*/
 
-#define STACK_MAX_SIZE  256
+
 
 //#define INTERNAL_BUFFER_REALLOC_SIZE   16384
 //static size_t s_nInternalBufferSize = 0;
 //static char* s_pcInternalBuffer = NEWNULLPTR;
-struct SMemoryItem{
-    struct SMemoryItem *prev, *next;
-    void *vBacktraceCrt[STACK_MAX_SIZE], *vBacktraceDel[STACK_MAX_SIZE];
-    int32_t stackDeepCrt, stackDeepDel;
-    char* startingAddress2;
-    size_t size2;
-    enum MemoryType type;
-    int reserved;
-};
 
-static struct SMemoryItemList{struct SMemoryItem * first, *last;} s_existing={NEWNULLPTR,NEWNULLPTR}, s_deleted={NEWNULLPTR,NEWNULLPTR};
+
+static struct SMemoryItemList{struct SMemoryItemPrivate * first, *last;} s_existing={NEWNULLPTR,NEWNULLPTR}, s_deleted={NEWNULLPTR,NEWNULLPTR};
 static int s_nSizeInDeleted = 0;
 
 
 //static void*
 
-static void AddSMemoryItemToList(struct SMemoryItem * a_pItem, struct SMemoryItemList* a_pList, enum MemoryType a_memoryType, void* a_pMemory, size_t a_unSize)
+static void AddSMemoryItemToList(struct SMemoryItemPrivate * a_pItem, struct SMemoryItemList* a_pList)
 {
     // todo: analize here is needed?
 
     /*///////////////////////////////////////////////////////////////////////////////////////////*/
-    a_pItem->type = a_memoryType;
     a_pItem->prev = a_pList->last;
     a_pItem->next = NEWNULLPTR;
 
     if(a_pList->first){
-        a_pList->first->prev = a_pItem;
+        a_pList->first->next = a_pItem;
     }
     else{
         a_pList->first = a_pItem;
     }
     a_pList->last = a_pItem;
 
-    a_pItem->startingAddress2 = STATIC_CAST(char*,a_pMemory);
-    a_pItem->size2 = a_unSize;
 }
 
-static void RemoveSMemoryItemFromList(struct SMemoryItem * a_pItem, struct SMemoryItemList* a_pList)
+static void RemoveSMemoryItemFromList(struct SMemoryItemPrivate * a_pItem, struct SMemoryItemList* a_pList)
 {
     if(a_pItem==a_pList->first){
         a_pList->first = a_pItem->next;
@@ -395,12 +392,12 @@ static void RemoveSMemoryItemFromList(struct SMemoryItem * a_pItem, struct SMemo
 
 }
 
-static struct SMemoryItem* FindMemoryItem(void* a_memoryJustCreatedOrWillBeFreed, struct SMemoryItemList* a_pList)
+static struct SMemoryItemPrivate* FindMemoryItem(void* a_memoryJustCreatedOrWillBeFreed, struct SMemoryItemList* a_pList)
 {
     char* pAddressToRemove = STATIC_CAST(char*,a_memoryJustCreatedOrWillBeFreed);
-    struct SMemoryItem* pItem=a_pList->first;
+    struct SMemoryItemPrivate* pItem=a_pList->first;
     while(pItem){
-        if(pItem->startingAddress2==pAddressToRemove){
+        if(pItem->userItem.startingAddress==pAddressToRemove){
             return pItem;
         }
         pItem = pItem->next;
@@ -414,39 +411,38 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
 {
     // enum MemoryType {createdByMalloc,createdByNew, createdByNewArray};
     // enum HookType {HookTypeMallocC, HookTypeCallocC, HookTypeReallocC, HookTypeFreeC,HookTypeNewCpp,HookTypeDeleteCpp,HookTypeNewArrayCpp,HookTypeDeleteArrayCpp};
+    static int sisFirstCall=1;
+    int nMemoryAllocationType=s_nMemoryAllocationType;
     static void *svBacktrace[STACK_MAX_SIZE];
-    struct SMemoryItem* pItem=NEWNULLPTR;
+    struct SMemoryItemPrivate* pItem=NEWNULLPTR;
     int32_t nFailedBacktraceSize;
-    int nIsFirstCall = s_isFirstCall;
+    int nIsFirstCall = sisFirstCall;
     BOOL_T_2 bContinue;
 
-    if(!nIsFirstCall){
+    sisFirstCall = 0;
+
+    if(nIsFirstCall){
         bContinue = (*s_MemoryHookFunction)(a_type,a_memoryJustCreatedOrWillBeFreed,a_size,a_pMemorForRealloc);
         if(!bContinue){
             return;
         }
     }
 
-#if 0
-    char** ppSymbols = backtrace_symbols(pStack,nStackDeepness);
-    if(ppSymbols){
-        for(int i=0; i<nStackDeepness; ++i)
-        {
-            //printf("%s\n",ppSymbols[i]);
-        }
-        free(ppSymbols);
-    }
-#endif
+    s_nMemoryAllocationType = MEMOR_TYPE_INTERNAL;
 
     switch(a_type){
     case HookTypeMallocC: case HookTypeCallocC: case HookTypeReallocC:
-        pItem = STATIC_CAST(struct SMemoryItem*,malloc(sizeof(struct SMemoryItem*)));
+        pItem = STATIC_CAST(struct SMemoryItemPrivate*,malloc(sizeof(struct SMemoryItem*)));
         if(!pItem){
             return;
         }
+        pItem->isDeleted = 0;
         pItem->stackDeepCrt=pItem->stackDeepDel = 0;
         pItem->stackDeepCrt = backtrace(pItem->vBacktraceCrt,STACK_MAX_SIZE);
-        AddSMemoryItemToList(pItem,&s_existing,CreatedByMalloc,a_memoryJustCreatedOrWillBeFreed,a_size);
+        pItem->userItem.type = CreatedByMalloc;
+        pItem->userItem.startingAddress = STATIC_CAST(char*,a_memoryJustCreatedOrWillBeFreed);
+        pItem->userItem.size = a_size;
+        AddSMemoryItemToList(pItem,&s_existing);
         break;
     case HookTypeFreeC:
         pItem = FindMemoryItem(a_memoryJustCreatedOrWillBeFreed, &s_existing);
@@ -454,11 +450,19 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
             fprintf(stderr, "!!!!!! Trying to delete non existing memory!\n");
             nFailedBacktraceSize = backtrace(svBacktrace,STACK_MAX_SIZE);
             AnalizeBadMemoryCase(a_memoryJustCreatedOrWillBeFreed,svBacktrace,nFailedBacktraceSize);
-            return;
+            goto returnPoint;
         }
+        if(pItem->userItem.type!=CreatedByMalloc){
+            fprintf(stderr, "!!!!!! Trying to delete non malloced memory by free!\n");
+            // todo: shall Application be crashed?
+            nFailedBacktraceSize = backtrace(svBacktrace,STACK_MAX_SIZE);
+            AnalizeBadMemoryCase(a_memoryJustCreatedOrWillBeFreed,svBacktrace,nFailedBacktraceSize);
+            goto returnPoint;
+        }
+        pItem->isDeleted = 1;
         RemoveSMemoryItemFromList(pItem,&s_existing);
         pItem->stackDeepDel = backtrace(pItem->vBacktraceDel,STACK_MAX_SIZE);
-        AddSMemoryItemToList(pItem,&s_deleted,CreatedByMalloc,a_memoryJustCreatedOrWillBeFreed,a_size);
+        AddSMemoryItemToList(pItem,&s_deleted);
         if(++s_nSizeInDeleted>=MAX_NUMBER_OF_DELETED_ITEMS){
             RemoveSMemoryItemFromList(s_existing.first,&s_existing);
         }
@@ -466,6 +470,10 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
     default:
         break;
     }
+
+returnPoint:
+    sisFirstCall = nIsFirstCall;
+    s_nMemoryAllocationType=nMemoryAllocationType;
 
 }
 
@@ -476,7 +484,7 @@ static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed, void** 
 {
     char* pcMemoryJustCreatedOrWillBeFreed = STATIC_CAST(char*,a_memoryJustCreatedOrWillBeFreed);
     ptrdiff_t leftDiffMin=-1, rightDiffMin=-1, diffCurrentLeft, diffCurrentRight;
-    struct SMemoryItem *pLeftMin=NEWNULLPTR, *pRightMin=NEWNULLPTR, *pCurrent;
+    struct SMemoryItemPrivate *pLeftMin=NEWNULLPTR, *pRightMin=NEWNULLPTR, *pCurrent;
     int isInsideExisting=0, isInsideDeleted=0, isLeftMinFromDeleted=0, isRightMinFromDeleted=0;
 
     printf("Analizing memory %p in the stack \n",a_memoryJustCreatedOrWillBeFreed);
@@ -484,8 +492,8 @@ static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed, void** 
 
     pCurrent=s_existing.first;
     while(pCurrent){
-        diffCurrentLeft = pCurrent->startingAddress2-pcMemoryJustCreatedOrWillBeFreed;
-        diffCurrentRight = pcMemoryJustCreatedOrWillBeFreed-(pCurrent->startingAddress2+pCurrent->size2);
+        diffCurrentLeft = pCurrent->userItem.startingAddress-pcMemoryJustCreatedOrWillBeFreed;
+        diffCurrentRight = pcMemoryJustCreatedOrWillBeFreed-(pCurrent->userItem.startingAddress+pCurrent->userItem.size);
         if((diffCurrentLeft<=0)&&(diffCurrentRight<=0)){
             isInsideExisting = 1;
             goto analizePoint;
@@ -508,8 +516,8 @@ static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed, void** 
 
     pCurrent=s_deleted.first;
     while(pCurrent){
-        diffCurrentLeft = pCurrent->startingAddress2-pcMemoryJustCreatedOrWillBeFreed;
-        diffCurrentRight = pcMemoryJustCreatedOrWillBeFreed-(pCurrent->startingAddress2+pCurrent->size2);
+        diffCurrentLeft = pCurrent->userItem.startingAddress-pcMemoryJustCreatedOrWillBeFreed;
+        diffCurrentRight = pcMemoryJustCreatedOrWillBeFreed-(pCurrent->userItem.startingAddress+pCurrent->userItem.size);
         if((diffCurrentLeft<=0)&&(diffCurrentRight<=0)){
             isInsideDeleted = 1;
             goto analizePoint;
@@ -576,8 +584,9 @@ analizePoint:
 static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepness)
 {
     if(a_nStackDeepness>0){
+        int nMemoryAllocationType = s_nMemoryAllocationType;
         char** ppSymbols;
-        s_nDoMallocFromLocalPool = 1;
+        s_nMemoryAllocationType = MEMOR_TYPE_MMAP;
         ppSymbols = backtrace_symbols(a_pBacktrace,a_nStackDeepness);
         if(ppSymbols){
             for(int32_t i=0; i<a_nStackDeepness; ++i)
@@ -586,7 +595,7 @@ static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepn
             }
         }
         free(ppSymbols);
-        s_nDoMallocFromLocalPool = 0;
+        s_nMemoryAllocationType = nMemoryAllocationType;
     }
 }
 
