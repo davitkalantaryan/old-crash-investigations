@@ -52,7 +52,7 @@ struct MemoryItem{
 };
 
 
-void InitializeCrashAnalizer(void);
+BOOL_T_2 InitializeCrashAnalizer(void);
 void CleanupCrashAnalizer(void);
 TypeHookFunction SetMemoryInvestigator(TypeHookFunction a_newFnc);
 
