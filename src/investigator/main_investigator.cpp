@@ -22,7 +22,9 @@
 #endif
 #include <dlfcn.h>
 #include <pthread.h>
+#include <unistd.h>
 
+// enum HookType {HookTypeMallocC, HookTypeCallocC, HookTypeReallocC, HookTypeFreeC,HookTypeNewCpp,HookTypeDeleteCpp,HookTypeNewArrayCpp,HookTypeDeleteArrayCpp};
 static BOOL_T_2 HookFunctionStatic(enum HookType,void*, size_t a_size, void*)
 //static BOOL_T_2 HookFunctionStatic(enum HookType,void*, size_t , void*)
 {
@@ -30,19 +32,40 @@ static BOOL_T_2 HookFunctionStatic(enum HookType,void*, size_t a_size, void*)
     return 1;
 }
 
-static pthread_rwlock_t rwLock = PTHREAD_RWLOCK_INITIALIZER;
+
+class MyClass
+{
+public:
+    char m_1;
+};
+
 
 int main()
 {
-    pthread_rwlock_wrlock(&rwLock);
-    pthread_rwlock_unlock(&rwLock);
+    char* pMemory;
+    MyClass* pMemoryCls;
+    //InitializeCrashAnalizer();
     //usleep(10000000);
     //InitializeCrashAnalizer();
     SetMemoryInvestigator(&HookFunctionStatic);
     printf("Crash analizer test!\n");
     //printf("Crash analizer test!\n");
-    void* pMemory = malloc(100);
-    free(pMemory);
+
+    pMemory = new char[1];
+    delete [] pMemory;
+    //free(pMemory);
+
+    pMemoryCls = new MyClass[1];
+    delete [] pMemoryCls;
+
+#if 1
+    for(int i=0;i<10;++i){
+        void* pMemory = malloc(100);
+        free(pMemory);
+        sleep(5);
+    }
+#endif
+
     //CleanupCrashAnalizer();
 	return 0;
 }
