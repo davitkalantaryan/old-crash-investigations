@@ -52,8 +52,6 @@
 
 #define MEMORY_SIGNATURE    20132015
 
-//#define ALLOC_SIZE_ON_SIZE(_size)   (_size + sizeof(struct SMemoryHeader))
-#define ALLOC_SIZE_ON_SIZE(_size)   (_size + 4096)
 
 #define   THREAD_LOCAL
 
@@ -123,7 +121,7 @@ static TypeRealloc s_realloc_aktual = &realloc_for_user_not_locked;
 static TypeCalloc s_calloc_aktual = &calloc_for_user_not_locked;
 static TypeFree2 s_free_aktual = &free_for_user_not_locked;
 
-static THREAD_LOCAL int s_isThreadLocked = 0;
+static pthread_t s_lockerThread = 0;
 
 END_C_DECL_2
 
@@ -177,18 +175,20 @@ void* malloc(size_t a_size)
 void* calloc(size_t a_num, size_t a_size)
 {
     void* pReturn = NEWNULLPTR;
-    int nThreadIsHere = s_isThreadLocked;
+    int isLockedHere = 0;
+    pthread_t thisThread = pthread_self();
 
-    if(!nThreadIsHere){
+    if(s_lockerThread != thisThread){
         pthread_rwlock_wrlock(&s_rw_lock);
-        s_isThreadLocked = 1;
+        s_lockerThread = thisThread;
+        isLockedHere = 1;
         InitializeCrashAnalizer();
     }
 
     pReturn = (*s_calloc_aktual)(a_num,a_size);
 
-    s_isThreadLocked = nThreadIsHere;
-    if(!nThreadIsHere){
+    if(isLockedHere){
+        s_lockerThread = 0;
         pthread_rwlock_unlock(&s_rw_lock);
     }
 
@@ -199,18 +199,20 @@ void* calloc(size_t a_num, size_t a_size)
 void* realloc(void *a_ptr, size_t a_size)
 {
     void* pReturn = NEWNULLPTR;
-    int nThreadIsHere = s_isThreadLocked;
+    int isLockedHere = 0;
+    pthread_t thisThread = pthread_self();
 
-    if(!nThreadIsHere){
+    if(s_lockerThread != thisThread){
         pthread_rwlock_wrlock(&s_rw_lock);
-        s_isThreadLocked = 1;
+        s_lockerThread = thisThread;
+        isLockedHere = 1;
         InitializeCrashAnalizer();
     }
 
     pReturn = (*s_realloc_aktual)(a_ptr,a_size);
 
-    s_isThreadLocked = nThreadIsHere;
-    if(!nThreadIsHere){
+    if(isLockedHere){
+        s_lockerThread = 0;
         pthread_rwlock_unlock(&s_rw_lock);
     }
 
@@ -229,18 +231,20 @@ void free(void *a_ptr)
 static void* malloc_general(enum HookType a_type,size_t a_size)
 {
     void* pReturn = NEWNULLPTR;
-    int nThreadIsHere = s_isThreadLocked;
+    int isLockedHere = 0;
+    pthread_t thisThread = pthread_self();
 
-    if(!nThreadIsHere){
+    if(thisThread!=s_lockerThread){
         pthread_rwlock_wrlock(&s_rw_lock);
-        s_isThreadLocked = 1;
+        s_lockerThread = thisThread;
+        isLockedHere = 1;
         InitializeCrashAnalizer();
     }
 
     pReturn = (*s_malloc_aktual)(a_type,a_size);
 
-    s_isThreadLocked = nThreadIsHere;
-    if(!nThreadIsHere){
+    if(isLockedHere){
+        s_lockerThread = 0;
         pthread_rwlock_unlock(&s_rw_lock);
     }
 
@@ -250,17 +254,19 @@ static void* malloc_general(enum HookType a_type,size_t a_size)
 
 static void free_general(enum HookType a_type,void* a_ptr)
 {
-    int nThreadIsHere = s_isThreadLocked;
+    int isLockedHere = 0;
+    pthread_t thisThread = pthread_self();
 
-    if(!nThreadIsHere){
+    if(thisThread!=s_lockerThread){
         pthread_rwlock_wrlock(&s_rw_lock);
-        s_isThreadLocked = 1;
+        s_lockerThread = thisThread;
+        isLockedHere = 1;
     }
 
     (*s_free_aktual)(a_type,a_ptr);
 
-    s_isThreadLocked = nThreadIsHere;
-    if(!nThreadIsHere){
+    if(isLockedHere){
+        s_lockerThread = 0;
         pthread_rwlock_unlock(&s_rw_lock);
     }
 }
@@ -359,8 +365,22 @@ static void  free_for_user_not_locked(enum HookType a_type, void* a_ptr)
 
 /*//////////////////////////////////////////////////////*/
 
-#define USER_BUFFER_TO_HEADER(_userBuffer)  REINTERPRET_CAST(struct SMemoryHeader*,STATIC_CAST(char*,(_userBuffer))-sizeof(struct SMemoryHeader))
 #define IS_MEMORY_FROM_HERE(_memHeader) ( (_memHeader)->signature==MEMORY_SIGNATURE )
+#define MY_MAX_(_num1,_num2)  ( (_num1)>(_num2)?(_num1):(_num2) )
+
+#define GRANULARITY_MIN1    63
+#define GRANULARITY         64
+
+#define USER_BUFFER_TO_HEADER(_userBuffer)  REINTERPRET_CAST(struct SMemoryHeader*,STATIC_CAST(char*,(_userBuffer))-GRANULARITY)
+#define HEADER_TO_USER_BUFFER(_rawBuffer)   STATIC_CAST(void*,REINTERPRET_CAST(char*,(_rawBuffer))+GRANULARITY)
+
+#define SIZE_BASED_ON_GRANULARITIY(_size,_gran,_granMin1)   ((_size)+(_granMin1))/(_gran)*(_gran)
+#define SIZE_BASED_ON_2_GRANULARITIES(_size,_gran1,_gran2)  SIZE_BASED_ON_GRANULARITIY(_size,MY_MAX_(_gran1,_gran2),(MY_MAX_(_gran1,_gran2)-1))
+
+//#define ALLOC_SIZE_ON_SIZE(_size)   (_size + sizeof(struct SMemoryHeader))
+//#define ALLOC_SIZE_ON_SIZE(_size)   (_size + 4096)
+//static inline size_t ALLOC_SIZE_ON_SIZE(size_t a_size);
+#define ALLOC_SIZE_ON_SIZE(_size)   ( GRANULARITY + SIZE_BASED_ON_GRANULARITIY(_size,GRANULARITY,GRANULARITY_MIN1) )
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -378,25 +398,26 @@ static void* malloc_calls_libc(enum HookType a_type,size_t a_size)
     pHeader->signature =MEMORY_SIGNATURE;
     //pHeader->pItem = NEWNULLPTR;
 
-    return pcReturn + sizeof(struct SMemoryHeader);
+    return HEADER_TO_USER_BUFFER(pcReturn);
 }
 
 
-static void* calloc_calls_libc(size_t a_num, size_t a_size)
+static void* calloc_calls_libc(size_t a_itemsNumber, size_t a_ItemsSize)
 {
     struct SMemoryHeader* pHeader;
-    //size_t unAllocNum = a_num + (24+sizeof(struct SMemoryHeader))/a_size;
-    size_t unAllocNum = a_num + 4096/a_size;
-    char* pcReturn = STATIC_CAST(char*,(*s_library_calloc)(unAllocNum,a_size));
+    size_t unSize = a_itemsNumber*a_ItemsSize;
+    size_t unAllocSize = SIZE_BASED_ON_2_GRANULARITIES(unSize,GRANULARITY,a_ItemsSize) + GRANULARITY;
+    size_t unNewItemsNum = unAllocSize/a_ItemsSize + 1;
+    char* pcReturn = STATIC_CAST(char*,(*s_library_calloc)(unNewItemsNum,a_ItemsSize));
 
     if(!pcReturn){return NEWNULLPTR;}
     pHeader = REINTERPRET_CAST(struct SMemoryHeader*,pcReturn);
     pHeader->type = MEMOR_TYPE_REGULAR;
-    pHeader->size = a_size;
+    pHeader->size = unSize;
     pHeader->signature =MEMORY_SIGNATURE;
     //pHeader->pItem = NEWNULLPTR;
 
-    return pcReturn + sizeof(struct SMemoryHeader);
+    return HEADER_TO_USER_BUFFER(pcReturn);
 }
 
 
@@ -444,7 +465,7 @@ static void* realloc_no_user_at_all(void* a_ptr,size_t a_size)
     pHeader->signature =MEMORY_SIGNATURE;
     //pHeader->pItem = NEWNULLPTR;
 
-    return pcReturn + sizeof(struct SMemoryHeader);
+    return HEADER_TO_USER_BUFFER(pcReturn);
 }
 
 
@@ -514,7 +535,7 @@ static void* malloc_uses_mmap(enum HookType a_type,size_t a_size)
     pHeader->signature =MEMORY_SIGNATURE;
     //pHeader->pItem = NEWNULLPTR;
 
-    return pcReturn + sizeof(struct SMemoryHeader);
+    return HEADER_TO_USER_BUFFER(pcReturn);
 }
 
 
@@ -564,22 +585,23 @@ BOOL_T_2 InitializeCrashAnalizer(void)
     TypeRealloc realloc_aktual = s_realloc_aktual;
     TypeCalloc calloc_aktual = s_calloc_aktual;
     TypeFree2 free_aktual = s_free_aktual;
-    int nThreadIsHere = s_isThreadLocked;
     struct sigaction sigAction;
     char lastSymb, preLastSymb;;
     char vcLibCName[32] = "libc.so.6X";
+    int isLockedHere ;
+    pthread_t thisThread ;
 
     if(s_pLibraryC){
-        s_malloc_aktual = malloc_aktual;
-        s_realloc_aktual = realloc_aktual;
-        s_calloc_aktual = calloc_aktual;
-        s_free_aktual = free_aktual;
         return 1;
     }
 
-    if(!nThreadIsHere){
+    isLockedHere = 0;
+    thisThread = pthread_self();
+
+    if(thisThread!=s_lockerThread){
         pthread_rwlock_wrlock(&s_rw_lock);
-        s_isThreadLocked = 1;
+        s_lockerThread = thisThread;
+        isLockedHere = 1;
     }
 
     s_malloc_aktual = &malloc_uses_mmap;
@@ -626,8 +648,8 @@ returnPoint:
     s_realloc_aktual = realloc_aktual;
     s_calloc_aktual = calloc_aktual;
     s_free_aktual = free_aktual;
-    s_isThreadLocked = nThreadIsHere;
-    if(!nThreadIsHere){
+    if(isLockedHere){
+        s_lockerThread = 0;
         pthread_rwlock_unlock(&s_rw_lock);
     }
     return nReturn;
@@ -658,7 +680,7 @@ static void AddSMemoryItemToList(struct SMemoryItemPrivate * a_pItem, struct SMe
     a_pItem->next = NEWNULLPTR;
 
     if(a_pList->first){
-        a_pList->first->next = a_pItem;
+        a_pList->last->next = a_pItem;
     }
     else{
         a_pList->first = a_pItem;
@@ -705,7 +727,7 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
     // enum MemoryType {createdByMalloc,createdByNew, createdByNewArray};
     // enum HookType {HookTypeMallocC, HookTypeCallocC, HookTypeReallocC, HookTypeFreeC,HookTypeNewCpp,HookTypeDeleteCpp,HookTypeNewArrayCpp,HookTypeDeleteArrayCpp};
     static int sisFirstCall=1;
-    static void *svBacktrace[STACK_MAX_SIZE];
+    void *svBacktrace[STACK_MAX_SIZE];
     struct SMemoryItemPrivate* pItem=NEWNULLPTR;
     int32_t nFailedBacktraceSize;
     int nIsFirstCall = sisFirstCall;
@@ -767,7 +789,9 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
         pItem->stackDeepDel = backtrace(pItem->vBacktraceDel,STACK_MAX_SIZE);
         AddSMemoryItemToList(pItem,&s_deleted);
         if(++s_nSizeInDeleted>=MAX_NUMBER_OF_DELETED_ITEMS){
-            RemoveSMemoryItemFromList(s_existing.first,&s_existing);
+            pItem = s_existing.first;
+            RemoveSMemoryItemFromList(pItem,&s_existing);
+            (*s_library_free)(pItem);
         }
         break;
     //default:
@@ -775,7 +799,7 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
     }
 
     if(isAdding){
-        pItem = STATIC_CAST(struct SMemoryItemPrivate*,malloc(sizeof(struct SMemoryItem*)));
+        pItem = STATIC_CAST(struct SMemoryItemPrivate*,(*s_library_malloc)(sizeof(struct SMemoryItemPrivate)));
         if(!pItem){
             goto returnPoint;
         }
@@ -875,19 +899,19 @@ analizePoint:
     else{
         if(pLeftMin){
             if(isLeftMinFromDeleted){
-                printf("\nbigger nearest pool is deleted. Deleting stack is:\n");
+                printf("\nbigger nearest memory is deleted. Deleting stack is:\n");
                 AnalizeStackFromBacktrace(pLeftMin->vBacktraceDel,pLeftMin->stackDeepDel);
             }
-            printf("\nCreation stack is:\n");
+            printf("\nbigger nearest memory creation stack is:\n");
             AnalizeStackFromBacktrace(pLeftMin->vBacktraceCrt,pLeftMin->stackDeepCrt);
         }
 
         if(pRightMin){
             if(isRightMinFromDeleted){
-                printf("\nsmaller nearest pool is deleted. Deleting stack is:\n");
+                printf("\nsmaller nearest memory is deleted. Deleting stack is:\n");
                 AnalizeStackFromBacktrace(pRightMin->vBacktraceDel,pRightMin->stackDeepDel);
             }
-            printf("\nCreation stack is:\n");
+            printf("\nsmaller nearest memory creation stack is:\n");
             AnalizeStackFromBacktrace(pRightMin->vBacktraceCrt,pRightMin->stackDeepCrt);
         }
     }
@@ -914,10 +938,14 @@ static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepn
 
         ppSymbols = backtrace_symbols(a_pBacktrace,a_nStackDeepness);
         if(ppSymbols){
+            a_nStackDeepness -= 1;
+            ppSymbols += 1;
+            printf("================ Stack starts ================\n");
             for(int32_t i=0; i<a_nStackDeepness; ++i)
             {
                 printf("%s\n",ppSymbols[i]);
             }
+            printf("================ Stack   ends ================\n");
         }
         free(ppSymbols);
 

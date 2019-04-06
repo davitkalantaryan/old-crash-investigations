@@ -14,6 +14,14 @@
   *       Details :  ...
   */
 
+//
+// todo:
+// https://oroboro.com/printing-stack-traces-file-line/
+// (gdb) info symbol 0x4005BDC
+// addr2line -e  investigator 0x189b
+// gdb --silent --eval-command "info symbol 0x189b" -ex "quit" ./investigator
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <crash_investigator.h>
@@ -44,7 +52,7 @@ int main()
 {
     char* pMemory;
     MyClass* pMemoryCls;
-    //InitializeCrashAnalizer();
+    InitializeCrashAnalizer();
     //usleep(10000000);
     //InitializeCrashAnalizer();
     SetMemoryInvestigator(&HookFunctionStatic);
@@ -52,7 +60,9 @@ int main()
     //printf("Crash analizer test!\n");
 
     pMemory = new char[1];
-    delete [] pMemory;
+    //delete [] pMemory;
+    //delete pMemory;
+    delete (pMemory-1);
     //free(pMemory);
 
     pMemoryCls = new MyClass[1];
