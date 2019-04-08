@@ -12,19 +12,12 @@ INCLUDEPATH += $${PWD}/../../../include
 LIBS += -ldl
 
 SOURCES  += \
-    $${PWD}/../../../src/investigator/main_investigator.cpp \
-    $${PWD}/../../../src/investigator/crash_investigator_unix_gcc.cpp \
-    $${PWD}/../../../src/util/inject_x86_64.c \
-    $${PWD}/../../../src/util/utils.c \
-    $${PWD}/../../../src/util/ptrace.c
+    $${PWD}/../../../src/test/main_inner_investigator_test.cpp
 	
 HEADERS += \
-    $${PWD}/../../../include/crash_investigator.h \
-    $${PWD}/../../../src/util/utils.h \
-    $${PWD}/../../../src/util/ptrace.h
+    $${PWD}/../../../include/crash_investigator.h
 
 OTHER_FILES += \
-    $${PWD}/../../../src/test/main_inner_investigator_test.cpp \
     $${PWD}/../../../src/investigator/crash_investigator.c \
     $${PWD}/../../../src/investigator/crash_investigator_microsoft.c \
     $${PWD}/../../../src/investigator/crash_investigator_unix.cpp \

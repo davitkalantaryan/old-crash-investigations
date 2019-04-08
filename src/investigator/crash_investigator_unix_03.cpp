@@ -17,9 +17,6 @@
   */
 
 
-#define USE_MEMORY_HOOKS
-
-
 #ifdef __GNUC__
 //#pragma GCC diagnostic ignored "-Wreserved-id-macro"
 //#define DISABLE_UNUSED_PARS _Pargma()
@@ -31,13 +28,13 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <malloc.h>
 #include "crash_investigator.h"
 #include <unistd.h>
 #ifndef _GNU_SOURCE
 #endif
 #include <dlfcn.h>
 #include <pthread.h>
-
 #include <execinfo.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -71,45 +68,6 @@ typedef void* (*TypeRealloc)(void*,size_t);
 typedef void* (*TypeCalloc)(size_t nmemb, size_t size);
 typedef void (*TypeFree2)(enum HookType,void*);
 
-
-/*///////////////////////////////////////////////////////////////////////////////////////////////////////*/
-
-
-#ifdef USE_MEMORY_HOOKS
-#define IS_STATIC   static
-typedef void* (*TypeMallocHook)(size_t, const void *);
-typedef void* (*TypeReallocHook)(void*,size_t, const void *);
-typedef void  (*TypeFreeHook)(void *, const void*);
-extern TypeMallocHook __malloc_hook;
-extern TypeReallocHook __realloc_hook;
-extern TypeFreeHook __free_hook;
-static TypeMallocHook s_malloc_hook_initial = NEWNULLPTR;
-static TypeReallocHook s_realloc_hook_initial= NEWNULLPTR;
-static TypeFreeHook s_free_hook_initial= NEWNULLPTR;
-IS_STATIC void* hooked_malloc(size_t a_size, const void* a_nextMem);
-IS_STATIC void* hooked_realloc(void *a_ptr, size_t a_size,const void* a_nextMem);
-IS_STATIC void hooked_free(void *a_ptr, const void* a_nextMem);
-static int s_nLibraryInited = 0;
-#else
-#define IS_STATIC
-#define hooked_malloc(_sizeTypeAndVar, _nextMem)  malloc(_sizeTypeAndVar)
-#define hooked_realloc(_ptrTypeAndVar, _sizeTypeAndVar, _nextMem) realloc(_ptrTypeAndVar, _sizeTypeAndVar)
-#define hooked_free(_ptrTypeAndVar, _nextMem) free(_ptrTypeAndVar)
-static TypeMallocLib s_library_malloc = NEWNULLPTR;
-static TypeRealloc s_library_realloc = NEWNULLPTR;
-static TypeCalloc s_library_calloc = NEWNULLPTR;
-static TypeFreeLib s_library_free = NEWNULLPTR;
-
-static void* malloc_uses_mmap(enum HookType,size_t);
-static void* calloc_uses_mmap(size_t,size_t);
-
-static void* s_pLibraryC = NEWNULLPTR;
-#endif
-
-/*///////////////////////////////////////////////////////////////////////////////////////////////////////*/
-
-
-
 typedef void (*TYPE_SIG_HANDLER)(int sigNum, siginfo_t * sigInfo, void * stackInfo);
 
 struct SMemoryItemPrivate{
@@ -129,7 +87,7 @@ struct SMemoryHeader{
 };
 
 static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJustCreatedOrWillBeFreed, size_t a_size, void* a_pMemorForRealloc);
-static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed) __attribute__ ((noreturn));
+static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed);
 static BOOL_T_2 UserHookFunctionDefault(enum HookType type,void* memoryCreatedOrWillBeFreed, size_t size, void* _memoryForRealloc);
 
 static void* malloc_general(enum HookType a_type,size_t a_size);
@@ -145,11 +103,18 @@ static void* calloc_calls_libc(size_t,size_t);
 static void* realloc_no_user_at_all(void*,size_t);
 static void  free_no_user_at_all(enum HookType,void*);
 
+static void* malloc_uses_mmap(enum HookType,size_t);
+static void* calloc_uses_mmap(size_t,size_t);
 
 static TypeHookFunction s_MemoryHookFunction = &UserHookFunctionDefault;
+static void* s_pLibraryC = NEWNULLPTR;
 static pthread_rwlock_t s_rw_lock = PTHREAD_RWLOCK_INITIALIZER;
 static struct sigaction s_sigSegvActionOld;
 
+static TypeMallocLib s_library_malloc = NEWNULLPTR;
+static TypeRealloc s_library_realloc = NEWNULLPTR;
+static TypeCalloc s_library_calloc = NEWNULLPTR;
+static TypeFreeLib s_library_free = NEWNULLPTR;
 
 static TypeMalloc2 s_malloc_aktual = &malloc_for_user_not_locked;
 static TypeRealloc s_realloc_aktual = &realloc_for_user_not_locked;
@@ -201,16 +166,12 @@ BEGIN_C_DECL_2
 /*/////////////////////////////////////////////////////////////////////////*/
 
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-IS_STATIC void* hooked_malloc(size_t a_size, const void* a_nextMem)
-{    
-#pragma GCC diagnostic pop
+void* malloc(size_t a_size)
+{
     return malloc_general(HookTypeMallocC,a_size);
 }
 
 
-#ifndef USE_MEMORY_HOOKS
 void* calloc(size_t a_num, size_t a_size)
 {
     void* pReturn = NEWNULLPTR;
@@ -233,14 +194,10 @@ void* calloc(size_t a_num, size_t a_size)
 
     return pReturn;
 }
-#endif  // #ifndef USE_MEMORY_HOOKS
 
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-IS_STATIC void* hooked_realloc(void *a_ptr, size_t a_size,const void* a_nextMem)
-{    
-#pragma GCC diagnostic pop
+void* realloc(void *a_ptr, size_t a_size)
+{
     void* pReturn = NEWNULLPTR;
     int isLockedHere = 0;
     pthread_t thisThread = pthread_self();
@@ -263,11 +220,8 @@ IS_STATIC void* hooked_realloc(void *a_ptr, size_t a_size,const void* a_nextMem)
 }
 
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-IS_STATIC void hooked_free(void *a_ptr, const void* a_nextMem)
-{    
-#pragma GCC diagnostic pop
+void free(void *a_ptr)
+{
     if(a_ptr){
         free_general(HookTypeFreeC,a_ptr);
     }
@@ -437,21 +391,7 @@ static void* malloc_calls_libc(enum HookType a_type,size_t a_size)
 #pragma GCC diagnostic pop
     struct SMemoryHeader* pHeader;
     size_t unAllocSize = ALLOC_SIZE_ON_SIZE(a_size);
-#ifdef USE_MEMORY_HOOKS
-    char* pcReturn;
-    TypeMallocHook malloc_hook_in = __malloc_hook;
-    TypeReallocHook realloc_hook_in= __realloc_hook;
-    TypeFreeHook free_hook_in= __free_hook;
-    __malloc_hook = s_malloc_hook_initial;
-    __realloc_hook = s_realloc_hook_initial;
-    __free_hook = s_free_hook_initial;
-    pcReturn = STATIC_CAST(char*,malloc(unAllocSize));
-    __malloc_hook = malloc_hook_in;
-    __realloc_hook = realloc_hook_in;
-    __free_hook = free_hook_in;
-#else
     char* pcReturn = STATIC_CAST(char*,(*s_library_malloc)(unAllocSize));
-#endif
 
     if(!pcReturn){return NEWNULLPTR;}
     pHeader = REINTERPRET_CAST(struct SMemoryHeader*,pcReturn);
@@ -470,21 +410,7 @@ static void* calloc_calls_libc(size_t a_itemsNumber, size_t a_ItemsSize)
     size_t unSize = a_itemsNumber*a_ItemsSize;
     size_t unAllocSize = SIZE_BASED_ON_2_GRANULARITIES(unSize,GRANULARITY,a_ItemsSize) + GRANULARITY;
     size_t unNewItemsNum = unAllocSize/a_ItemsSize + 1;
-#ifdef USE_MEMORY_HOOKS
-    char* pcReturn;
-    TypeMallocHook malloc_hook_in = __malloc_hook;
-    TypeReallocHook realloc_hook_in= __realloc_hook;
-    TypeFreeHook free_hook_in= __free_hook;
-    __malloc_hook = s_malloc_hook_initial;
-    __realloc_hook = s_realloc_hook_initial;
-    __free_hook = s_free_hook_initial;
-    pcReturn = STATIC_CAST(char*,calloc(unNewItemsNum,a_ItemsSize));
-    __malloc_hook = malloc_hook_in;
-    __realloc_hook = realloc_hook_in;
-    __free_hook = free_hook_in;
-#else
     char* pcReturn = STATIC_CAST(char*,(*s_library_calloc)(unNewItemsNum,a_ItemsSize));
-#endif
 
     if(!pcReturn){return NEWNULLPTR;}
     pHeader = REINTERPRET_CAST(struct SMemoryHeader*,pcReturn);
@@ -499,27 +425,13 @@ static void* calloc_calls_libc(size_t a_itemsNumber, size_t a_ItemsSize)
 
 static void* realloc_no_user_at_all(void* a_ptr,size_t a_size)
 {
-    void* pReturn=NEWNULLPTR;
     struct SMemoryHeader* pHeader;
     size_t unAllocSize = ALLOC_SIZE_ON_SIZE(a_size);
     char* pcReturn = NEWNULLPTR;
 
-#ifdef USE_MEMORY_HOOKS
-    TypeMallocHook malloc_hook_in = __malloc_hook;
-    TypeReallocHook realloc_hook_in= __realloc_hook;
-    TypeFreeHook free_hook_in= __free_hook;
-    __malloc_hook = s_malloc_hook_initial;
-    __realloc_hook = s_realloc_hook_initial;
-    __free_hook = s_free_hook_initial;
-#endif
-
     if(a_ptr){
         pHeader = USER_BUFFER_TO_HEADER(a_ptr);
-
         if(IS_MEMORY_FROM_HERE(pHeader)){
-#ifdef USE_MEMORY_HOOKS
-            pcReturn = STATIC_CAST(char*,realloc(pHeader,unAllocSize));
-#else
             switch(pHeader->type){
             case MEMOR_TYPE_REGULAR:
                 pcReturn = STATIC_CAST(char*,(*s_library_realloc)(pHeader,unAllocSize));
@@ -542,40 +454,20 @@ static void* realloc_no_user_at_all(void* a_ptr,size_t a_size)
             default:
                 return (*s_library_realloc)(a_ptr,a_size);
             }
-#endif
-        }
-        else{
-#ifdef USE_MEMORY_HOOKS
-            pcReturn = STATIC_CAST(char*,realloc(a_ptr,a_size));
-#else
-            return (*s_library_realloc)(a_ptr,a_size);
-#endif
         }
     }
     else{
-#ifdef USE_MEMORY_HOOKS
-        pcReturn = STATIC_CAST(char*,realloc(NEWNULLPTR,unAllocSize));
-#else
-        pcReturn = STATIC_CAST(char*,(*s_library_realloc)(NEWNULLPTR,unAllocSize));
-#endif
+        return (*s_library_realloc)(a_ptr,a_size);
     }
 
-
-    if(!pcReturn){goto returnPoint;}
+    if(!pcReturn){return NEWNULLPTR;}
     pHeader = REINTERPRET_CAST(struct SMemoryHeader*,pcReturn);
     pHeader->type = MEMOR_TYPE_REGULAR;
     pHeader->size = a_size;
     pHeader->signature =MEMORY_SIGNATURE;
     //pHeader->pItem = NEWNULLPTR;
 
-    pReturn = HEADER_TO_USER_BUFFER(pcReturn);
-returnPoint:
-#ifdef USE_MEMORY_HOOKS
-    __malloc_hook = malloc_hook_in;
-    __realloc_hook = realloc_hook_in;
-    __free_hook = free_hook_in;
-#endif
-    return pReturn;
+    return HEADER_TO_USER_BUFFER(pcReturn);
 }
 
 
@@ -584,22 +476,11 @@ returnPoint:
 static void  free_no_user_at_all(enum HookType a_type, void* a_ptr)
 {
 #pragma GCC diagnostic pop
+    struct SMemoryHeader* pHeader;
 
     if(a_ptr){
-        struct SMemoryHeader* pHeader;
-#ifdef USE_MEMORY_HOOKS
-        TypeMallocHook malloc_hook_in = __malloc_hook;
-        TypeReallocHook realloc_hook_in= __realloc_hook;
-        TypeFreeHook free_hook_in= __free_hook;
-        __malloc_hook = s_malloc_hook_initial;
-        __realloc_hook = s_realloc_hook_initial;
-        __free_hook = s_free_hook_initial;
-#endif
         pHeader = USER_BUFFER_TO_HEADER(a_ptr);
-        if(IS_MEMORY_FROM_HERE(pHeader)){            
-#ifdef USE_MEMORY_HOOKS
-            free(pHeader);
-#else
+        if(IS_MEMORY_FROM_HERE(pHeader)){
             switch(pHeader->type){
             case MEMOR_TYPE_REGULAR:
                 if(s_library_free){
@@ -621,20 +502,21 @@ static void  free_no_user_at_all(enum HookType a_type, void* a_ptr)
             default:
                 (*s_library_free)(a_ptr);
             }
-#endif
         }
-#ifdef USE_MEMORY_HOOKS
-        __malloc_hook = malloc_hook_in;
-        __realloc_hook = realloc_hook_in;
-        __free_hook = free_hook_in;
-#endif
+    }
+    else{
+        if(s_library_free){
+            (*s_library_free)(a_ptr);
+        }
+        else{
+            // todo:
+        }
     }
 
 }
 
 
 /*///////////////////////////////////////////////////////////////////////////////////////////////////////////*/
-#ifndef USE_MEMORY_HOOKS
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 static void* malloc_uses_mmap(enum HookType a_type,size_t a_size)
@@ -669,8 +551,6 @@ static void* calloc_uses_mmap(size_t a_num, size_t a_size)
     return pReturn;
 }
 
-#endif // #ifndef USE_MEMORY_HOOKS
-
 
 
 #define PRE_LAST_SYMBOL_INDEX   8
@@ -704,51 +584,7 @@ void CleanupCrashAnalizer(void)
 
 
 BOOL_T_2 InitializeCrashAnalizer(void)
-{    
-#ifdef USE_MEMORY_HOOKS
-
-    int nReturn = 0;
-    pthread_t thisThread ;
-    int isLockedHere ;
-    struct sigaction sigAction;
-
-    if(s_nLibraryInited){
-        return 1;
-    }
-
-    isLockedHere = 0;
-    thisThread = pthread_self();
-
-    if(thisThread!=s_lockerThread){
-        pthread_rwlock_wrlock(&s_rw_lock);
-        s_lockerThread = thisThread;
-        isLockedHere = 1;
-    }
-
-
-    s_malloc_hook_initial = __malloc_hook;
-    s_realloc_hook_initial = __realloc_hook;
-    s_free_hook_initial = __free_hook;
-
-    __malloc_hook = &hooked_malloc;
-    __realloc_hook = &hooked_realloc;
-    __free_hook = &hooked_free;
-
-    sigemptyset(&sigAction.sa_mask);
-    sigAction.sa_flags = STATIC_CAST(int,SA_SIGINFO|SA_RESETHAND);
-    sigAction.sa_sigaction = STATIC_CAST(TYPE_SIG_HANDLER,SigSegvHandler);
-    sigaction(SIGSEGV, &sigAction, &s_sigSegvActionOld);
-
-    if(isLockedHere){
-        s_lockerThread = 0;
-        pthread_rwlock_unlock(&s_rw_lock);
-    }
-    s_nLibraryInited = 1;
-    nReturn = 1;
-    return nReturn;
-
-
-#else    // #ifdef USE_MEMORY_HOOKS
+{
     int nReturn = 0;
     TypeMalloc2 malloc_aktual = s_malloc_aktual;
     TypeRealloc realloc_aktual = s_realloc_aktual;
@@ -822,8 +658,6 @@ returnPoint:
         pthread_rwlock_unlock(&s_rw_lock);
     }
     return nReturn;
-
-#endif // #ifdef USE_MEMORY_HOOKS
 }
 
 
@@ -903,16 +737,10 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
     BOOL_T_2 bContinue;
     BOOL_T_2 isAdding = 0;
     enum MemoryType memoryType = CreatedByMalloc;
-#ifdef USE_MEMORY_HOOKS
-    TypeMallocHook malloc_hook_in = __malloc_hook;
-    TypeReallocHook realloc_hook_in= __realloc_hook;
-    TypeFreeHook free_hook_in= __free_hook;
-#else
     TypeMalloc2 malloc_aktual = s_malloc_aktual;
     TypeRealloc realloc_aktual = s_realloc_aktual;
     TypeCalloc calloc_aktual = s_calloc_aktual;
     TypeFree2 free_aktual = s_free_aktual;
-#endif
 
     sisFirstCall = 0;
 
@@ -923,16 +751,10 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
         }
     }
 
-#ifdef USE_MEMORY_HOOKS
-    __malloc_hook = s_malloc_hook_initial;
-    __realloc_hook = s_realloc_hook_initial;
-    __free_hook = s_free_hook_initial;
-#else
     s_malloc_aktual = &malloc_calls_libc;
     s_realloc_aktual = &realloc_no_user_at_all;
     s_calloc_aktual = &calloc_calls_libc;
-    s_free_aktual = &free_no_user_at_all;    
-#endif
+    s_free_aktual = &free_no_user_at_all;
 
     switch(a_type){
     case HookTypeMallocC: case HookTypeCallocC: case HookTypeReallocC:
@@ -970,11 +792,7 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
         if(++s_nSizeInDeleted>=MAX_NUMBER_OF_DELETED_ITEMS){
             pItem = s_existing.first;
             RemoveSMemoryItemFromList(pItem,&s_existing);
-#ifdef USE_MEMORY_HOOKS
-            free(pItem);
-#else
             (*s_library_free)(pItem);
-#endif
         }
         break;
     //default:
@@ -982,11 +800,7 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
     }
 
     if(isAdding){
-#ifdef USE_MEMORY_HOOKS
-        pItem = STATIC_CAST(struct SMemoryItemPrivate*,malloc(sizeof(struct SMemoryItemPrivate)));
-#else
         pItem = STATIC_CAST(struct SMemoryItemPrivate*,(*s_library_malloc)(sizeof(struct SMemoryItemPrivate)));
-#endif
         if(!pItem){
             goto returnPoint;
         }
@@ -999,17 +813,11 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
         AddSMemoryItemToList(pItem,&s_existing);
     }
 
-returnPoint:    
-#ifdef USE_MEMORY_HOOKS
-    __malloc_hook = malloc_hook_in;
-    __realloc_hook = realloc_hook_in;
-    __free_hook = free_hook_in;
-#else
+returnPoint:
     s_malloc_aktual = malloc_aktual;
     s_realloc_aktual = realloc_aktual;
     s_calloc_aktual = calloc_aktual;
     s_free_aktual = free_aktual;
-#endif
     sisFirstCall = nIsFirstCall;
 }
 

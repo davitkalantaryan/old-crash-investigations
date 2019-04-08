@@ -32,53 +32,112 @@
 #include <pthread.h>
 #include <unistd.h>
 
-// enum HookType {HookTypeMallocC, HookTypeCallocC, HookTypeReallocC, HookTypeFreeC,HookTypeNewCpp,HookTypeDeleteCpp,HookTypeNewArrayCpp,HookTypeDeleteArrayCpp};
+#include <sys/wait.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <spawn.h>
+#include <sys/ptrace.h>
+
 static BOOL_T_2 HookFunctionStatic(enum HookType,void*, size_t a_size, void*)
-//static BOOL_T_2 HookFunctionStatic(enum HookType,void*, size_t , void*)
 {
-    printf("size = %d\n",static_cast<int>(a_size));
+    printf("pid:%d => size = %d\n",getpid(), static_cast<int>(a_size));
+    return 1;
+}
+
+extern "C" int RunCode11(char* libname, pid_t target);
+
+int memcpy_into_target(pid_t pid, void* dest, const void* src, size_t n) {
+    /* just like memcpy, but copies it into the space of the target pid */
+    /* n must be a multiple of 4, or will otherwise be rounded down to be so */
+    int i;
+    long *d, *s;
+    d = (long*) dest;
+    s = (long*) src;
+    for (i = 0; i < n / sizeof(long); i++) {
+    if (ptrace(PTRACE_POKETEXT, pid, d+i, s[i]) == -1) {
+        perror("ptrace(PTRACE_POKETEXT)");
+        return 0;
+    }
+    }
     return 1;
 }
 
 
-class MyClass
+#define weak_variable
+
+extern void *weak_variable (*__malloc_hook) (size_t __size, const void *);
+extern void *weak_variable (*__realloc_hook) (void *__ptr, size_t __size, const void *);
+extern void  weak_variable (*__free_hook) (void *__ptr,const void *);
+
+
+int main(int a_argc, char* a_argv[])
 {
-public:
-    char m_1;
-};
+    int nPid;
 
-
-int main()
-{
-    char* pMemory;
-    MyClass* pMemoryCls;
-    InitializeCrashAnalizer();
-    //usleep(10000000);
-    //InitializeCrashAnalizer();
-    SetMemoryInvestigator(&HookFunctionStatic);
-    printf("Crash analizer test!\n");
-    //printf("Crash analizer test!\n");
-
-    pMemory = new char[1];
-    //delete [] pMemory;
-    //delete pMemory;
-    //delete (pMemory-1);
-    printf("pMem = %p\n",static_cast<void*>(pMemory));
-    *(pMemory-80000) = 0;
-    //free(pMemory);
-
-    pMemoryCls = new MyClass[1];
-    delete [] pMemoryCls;
-
-#if 1
-    for(int i=0;i<10;++i){
-        void* pMemory = malloc(100);
-        free(pMemory);
-        sleep(5);
+    if(a_argc<2){
+        fprintf(stderr,"command to debug is not provided!\n");
+        return 1;
     }
-#endif
 
-    //CleanupCrashAnalizer();
+    nPid = fork();
+
+    if(nPid){
+        //long ptrace(enum __ptrace_request request, pid_t pid,void *addr, void *data);
+        pid_t w;
+        int status;
+        enum __ptrace_setoptions options;
+
+        InitializeCrashAnalizer();
+
+        printf("pid=%d\n",nPid);
+        //kill(nPid,SIGSTOP);
+        //sleep(10);
+        //RunCode11("/afs/ifh.de/user/k/kalantar/dev/sys/bionic/lib/libinject.so.1",nPid);
+        //kill(nPid,SIGCONT);
+
+        ptrace(PTRACE_ATTACH,nPid);
+        wait(&status);
+        options = PTRACE_O_TRACEEXEC;
+        ptrace(PTRACE_SETOPTIONS ,nPid,&options);
+        ptrace(PTRACE_CONT,nPid);
+        sleep(1);
+
+        memcpy_into_target(nPid,&__malloc_hook,&__malloc_hook,sizeof(__malloc_hook));
+        memcpy_into_target(nPid,&__realloc_hook,&__realloc_hook,sizeof(__realloc_hook));
+        memcpy_into_target(nPid,&__free_hook,&__free_hook,sizeof(__free_hook));
+
+        //kill(nPid,SIGCONT);
+        ptrace(PTRACE_CONT,nPid);
+        ptrace(PTRACE_DETACH, nPid);
+
+        do {
+
+            w = waitpid(nPid, &status, WUNTRACED | WCONTINUED);
+            if (w == -1) {
+                perror("waitpid");
+                exit(EXIT_FAILURE);
+            }
+
+            if (WIFEXITED(status)) {
+                printf("exited, status=%d\n", WEXITSTATUS(status));
+            } else if (WIFSIGNALED(status)) {
+                printf("killed by signal %d\n", WTERMSIG(status));
+            } else if (WIFSTOPPED(status)) {
+                printf("stopped by signal %d\n", WSTOPSIG(status));
+            } else if (WIFCONTINUED(status)) {
+                printf("continued\n");
+            }
+        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+    }
+    else{
+        //InitializeCrashAnalizer();
+        //SetMemoryInvestigator(&HookFunctionStatic);
+        //kill(getpid(),SIGSTOP);
+        //dlopen("/afs/ifh.de/user/k/kalantar/dev/sys/bionic/lib/libinject.so.1",RTLD_LAZY);
+        execvp (a_argv[1], a_argv+1);
+    }
+
 	return 0;
 }
 
