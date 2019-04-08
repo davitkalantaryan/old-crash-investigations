@@ -62,7 +62,9 @@ int main()
     pMemory = new char[1];
     //delete [] pMemory;
     //delete pMemory;
-    delete (pMemory-1);
+    //delete (pMemory-1);
+    printf("pMem = %p\n",static_cast<void*>(pMemory));
+    *(pMemory-80000) = 0;
     //free(pMemory);
 
     pMemoryCls = new MyClass[1];
