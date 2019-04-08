@@ -69,7 +69,9 @@ int memcpy_into_target(pid_t pid, void* dest, const void* src, size_t n) {
 extern void *weak_variable (*__malloc_hook) (size_t __size, const void *);
 extern void *weak_variable (*__realloc_hook) (void *__ptr, size_t __size, const void *);
 extern void  weak_variable (*__free_hook) (void *__ptr,const void *);
+void *findRemoteSymbolAddress( const char* library, void* local_addr, pid_t pid );
 
+#define LIBRARY_TO_SEARCH "libgcc_s.so.1"
 
 int main(int a_argc, char* a_argv[])
 {
@@ -103,9 +105,13 @@ int main(int a_argc, char* a_argv[])
         ptrace(PTRACE_CONT,nPid);
         sleep(1);
 
-        memcpy_into_target(nPid,&__malloc_hook,&__malloc_hook,sizeof(__malloc_hook));
-        memcpy_into_target(nPid,&__realloc_hook,&__realloc_hook,sizeof(__realloc_hook));
-        memcpy_into_target(nPid,&__free_hook,&__free_hook,sizeof(__free_hook));
+        void* pMallocHookAddress = findRemoteSymbolAddress(LIBRARY_TO_SEARCH,&__malloc_hook,nPid);
+        void* pReallocHookAddress = findRemoteSymbolAddress(LIBRARY_TO_SEARCH,&__realloc_hook,nPid);
+        void* pFreeHookAddress = findRemoteSymbolAddress(LIBRARY_TO_SEARCH,&__free_hook,nPid);
+
+        memcpy_into_target(nPid,pMallocHookAddress,&__malloc_hook,sizeof(__malloc_hook));
+        memcpy_into_target(nPid,pReallocHookAddress,&__realloc_hook,sizeof(__realloc_hook));
+        memcpy_into_target(nPid,pFreeHookAddress,&__free_hook,sizeof(__free_hook));
 
         //kill(nPid,SIGCONT);
         ptrace(PTRACE_CONT,nPid);
@@ -139,6 +145,52 @@ int main(int a_argc, char* a_argv[])
     }
 
 	return 0;
+}
+
+#include <string.h>
+
+
+
+
+intptr_t findLibraryOffset( const char *library, pid_t pid )
+{
+    char filename[0xFF] = {0},
+         buffer[1024] = {0};
+    FILE *fp = NULL;
+    intptr_t address = 0;
+
+    sprintf( filename, "/proc/%d/maps", pid );
+
+    fp = fopen( filename, "rt" );
+    if( fp == NULL ){
+        perror("fopen");
+        goto done;
+    }
+
+    while( fgets( buffer, sizeof(buffer), fp ) ) {
+        if( strstr( buffer, library ) ){
+            address = (intptr_t)strtoul( buffer, NULL, 16 );
+            goto done;
+        }
+    }
+
+    done:
+
+    if(fp){
+        fclose(fp);
+    }
+
+    return address;
+}
+
+void *findRemoteSymbolAddress( const char* library, void* local_addr, pid_t pid )
+{
+    intptr_t local_handle, remote_handle;
+
+    local_handle = findLibraryOffset( library, getpid() );
+    remote_handle = findLibraryOffset( library,pid );
+
+    return (void *)( (intptr_t)local_addr + (intptr_t)remote_handle - (intptr_t)local_handle );
 }
 
 #if 0
