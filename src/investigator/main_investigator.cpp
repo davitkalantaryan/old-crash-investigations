@@ -27,6 +27,7 @@
 #include <crash_investigator.h>
 #include <unistd.h>
 #ifndef _GNU_SOURCE
+#define _GNU_SOURCE
 #endif
 #include <dlfcn.h>
 #include <pthread.h>
@@ -38,6 +39,13 @@
 #include <stdio.h>
 #include <spawn.h>
 #include <sys/ptrace.h>
+#include <sys/user.h>
+#include <memory.h>
+
+// https://www.i-programmer.info/programming/cc/3978-executable-code-injection-in-linux.html?start=1
+// https://courses.cs.washington.edu/courses/cse378/10au/sections/Section1_recap.pdf
+
+//#define __RTLD_DLOPEN	0x80000000
 
 static BOOL_T_2 HookFunctionStatic(enum HookType,void*, size_t a_size, void*)
 {
@@ -70,22 +78,43 @@ extern void *weak_variable (*__malloc_hook) (size_t __size, const void *);
 extern void *weak_variable (*__realloc_hook) (void *__ptr, size_t __size, const void *);
 extern void  weak_variable (*__free_hook) (void *__ptr,const void *);
 void *findRemoteSymbolAddress( const char* library, void* local_addr, pid_t pid );
+long freespaceaddr(pid_t pid);
 
 #define LIBRARY_TO_SEARCH "libgcc_s.so.1"
+extern "C" void *__libc_dlopen_mode  (const char *__name, int __mode);
+
+void CopyDataToProcess(pid_t a_prcPid, long a_prcAddr, const void* a_pLocalData, size_t a_dataLen)
+{
+    const unsigned long* ulLocalData = static_cast<const unsigned long*>(a_pLocalData);
+    unsigned long* ulRemData = reinterpret_cast<unsigned long*>(a_prcAddr);
+    size_t MaxIters = a_dataLen/sizeof(unsigned long);
+
+    for(size_t iter=0;iter<MaxIters;++iter){
+        ptrace(PTRACE_POKETEXT, a_prcPid, ulRemData+iter, ulLocalData+iter);
+    }
+
+}
 
 int main(int a_argc, char* a_argv[])
 {
     int nPid;
+    Dl_info dlIndo;
+    void *(*libc_dlopen_mode)  (const char *__name, int __mode)=&__libc_dlopen_mode;
 
     if(a_argc<2){
         fprintf(stderr,"command to debug is not provided!\n");
         return 1;
     }
 
+    //void* pLib = __libc_dlopen_mode("libc.so.6",RTLD_NOW | __RTLD_DLOPEN);
+    void* pFuncAddress = *reinterpret_cast<void**>(&libc_dlopen_mode);
+    int nReturn = dladdr(pFuncAddress,&dlIndo);
+
     nPid = fork();
 
     if(nPid){
         //long ptrace(enum __ptrace_request request, pid_t pid,void *addr, void *data);
+        struct user_regs_struct regs0,regs;
         pid_t w;
         int status;
         enum __ptrace_setoptions options;
@@ -99,11 +128,18 @@ int main(int a_argc, char* a_argv[])
         //kill(nPid,SIGCONT);
 
         ptrace(PTRACE_ATTACH,nPid);
-        wait(&status);
+        waitpid(nPid,&status,0);
         options = PTRACE_O_TRACEEXEC;
         ptrace(PTRACE_SETOPTIONS ,nPid,&options);
         ptrace(PTRACE_CONT,nPid);
         sleep(1);
+        ptrace(PTRACE_GETREGS, nPid, NULL, &regs);
+        memcpy(&regs0,&regs,sizeof(regs));
+        regs.rip = reinterpret_cast<unsigned long long int>(pFuncAddress);
+        //regs.rdi = ;
+        ptrace(PTRACE_SETREGS, nPid, NULL, &regs);
+
+
 
         void* pMallocHookAddress = findRemoteSymbolAddress(LIBRARY_TO_SEARCH,&__malloc_hook,nPid);
         void* pReallocHookAddress = findRemoteSymbolAddress(LIBRARY_TO_SEARCH,&__realloc_hook,nPid);
@@ -141,6 +177,7 @@ int main(int a_argc, char* a_argv[])
         //SetMemoryInvestigator(&HookFunctionStatic);
         //kill(getpid(),SIGSTOP);
         //dlopen("/afs/ifh.de/user/k/kalantar/dev/sys/bionic/lib/libinject.so.1",RTLD_LAZY);
+        ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         execvp (a_argv[1], a_argv+1);
     }
 
