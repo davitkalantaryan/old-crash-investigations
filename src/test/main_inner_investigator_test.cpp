@@ -63,21 +63,22 @@ int main()
     //printf("Crash analizer test!\n");
 
     pMemory = new char[1];
-    //delete [] pMemory;
+    delete [] pMemory;
     //delete pMemory;
     //delete (pMemory-1);
     printf("pMem = %p\n",static_cast<void*>(pMemory));
-    *(pMemory-80000) = 0;
+    //*(pMemory-80000) = 0;
     //free(pMemory);
 
     pMemoryCls = new MyClass[1];
     delete [] pMemoryCls;
 
 #if 1
-    for(int i=0;i<10;++i){
+    for(int i=0;i<100;++i){
+        printf("iter:%d\n",i);
         void* pMemory = malloc(100);
         free(pMemory);
-        sleep(5);
+        sleep(2);
     }
 #endif
 

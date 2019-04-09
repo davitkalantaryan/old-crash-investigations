@@ -41,11 +41,17 @@
 #include <sys/ptrace.h>
 #include <sys/user.h>
 #include <memory.h>
+#include <link.h>
+#include <elf.h>
 
 // https://www.i-programmer.info/programming/cc/3978-executable-code-injection-in-linux.html?start=1
 // https://courses.cs.washington.edu/courses/cse378/10au/sections/Section1_recap.pdf
 
-//#define __RTLD_DLOPEN	0x80000000
+#ifdef __RTLD_DLOPEN
+#define NEW_RTLD_DLOPEN	__RTLD_DLOPEN
+#else
+#define NEW_RTLD_DLOPEN	0x80000000
+#endif
 
 static BOOL_T_2 HookFunctionStatic(enum HookType,void*, size_t a_size, void*)
 {
@@ -54,6 +60,7 @@ static BOOL_T_2 HookFunctionStatic(enum HookType,void*, size_t a_size, void*)
 }
 
 extern "C" int RunCode11(char* libname, pid_t target);
+//#include <libexplain/ptrace.h>
 
 int memcpy_into_target(pid_t pid, void* dest, const void* src, size_t n) {
     /* just like memcpy, but copies it into the space of the target pid */
@@ -63,12 +70,39 @@ int memcpy_into_target(pid_t pid, void* dest, const void* src, size_t n) {
     d = (long*) dest;
     s = (long*) src;
     for (i = 0; i < n / sizeof(long); i++) {
-    if (ptrace(PTRACE_POKETEXT, pid, d+i, s[i]) == -1) {
+        //nRet =
+    if (ptrace(PTRACE_POKETEXT, pid, d+i, &s[i]) == -1) {
         perror("ptrace(PTRACE_POKETEXT)");
         return 0;
     }
     }
     return 1;
+}
+
+void ptraceWrite(int pid, unsigned long long addr, const void *a_data, int len) {
+    long word = 0;
+    int i = 0;
+    const char* data = static_cast<const char*>(a_data);
+
+    for (i=0; i < len; i+=sizeof(word), word=0) {
+      memcpy(&word, data + i, sizeof(word));
+      if (ptrace(PTRACE_POKETEXT, pid, addr + i, word) == -1) {
+        printf("[!] Error writing process memory\n");
+        exit(1);
+      }
+    }
+}
+
+
+void ptraceRead(int pid, unsigned long long addr, void *a_data, int len) {
+    long word = 0;
+    int i = 0;
+    char* data = static_cast<char*>(a_data);
+
+    for (i=0; i < len; i+=sizeof(word), word=0) {
+        word=ptrace(PTRACE_PEEKTEXT, pid, addr + i, NULL);
+      memcpy(data + i,&word, sizeof(word));
+    }
 }
 
 
@@ -83,22 +117,16 @@ long freespaceaddr(pid_t pid);
 #define LIBRARY_TO_SEARCH "libgcc_s.so.1"
 extern "C" void *__libc_dlopen_mode  (const char *__name, int __mode);
 
-void CopyDataToProcess(pid_t a_prcPid, long a_prcAddr, const void* a_pLocalData, size_t a_dataLen)
-{
-    const unsigned long* ulLocalData = static_cast<const unsigned long*>(a_pLocalData);
-    unsigned long* ulRemData = reinterpret_cast<unsigned long*>(a_prcAddr);
-    size_t MaxIters = a_dataLen/sizeof(unsigned long);
+#define LIB_TO_OPENNAME "libinject.so.1"
 
-    for(size_t iter=0;iter<MaxIters;++iter){
-        ptrace(PTRACE_POKETEXT, a_prcPid, ulRemData+iter, ulLocalData+iter);
-    }
-
-}
 
 int main(int a_argc, char* a_argv[])
 {
+    Elf64_Sym *pElfDlOpen=nullptr;
+    void* pMalloc=nullptr;
     int nPid;
-    Dl_info dlIndo;
+    Dl_info dlIndoDlOpen;
+    unsigned long long int ullnDlOpenSize, unStrLenPlus1, unStrLenRounded, unMallocSize;
     void *(*libc_dlopen_mode)  (const char *__name, int __mode)=&__libc_dlopen_mode;
 
     if(a_argc<2){
@@ -106,9 +134,25 @@ int main(int a_argc, char* a_argv[])
         return 1;
     }
 
-    //void* pLib = __libc_dlopen_mode("libc.so.6",RTLD_NOW | __RTLD_DLOPEN);
+    void* pLib = __libc_dlopen_mode("/lib/x86_64-linux-gnu/ld-2.27.so",RTLD_NOW | NEW_RTLD_DLOPEN);
+    if(pLib){
+        pMalloc =  dlsym(pLib,"malloc");
+    }
+    if(!pMalloc){
+        return 1;
+    }
     void* pFuncAddress = *reinterpret_cast<void**>(&libc_dlopen_mode);
-    int nReturn = dladdr(pFuncAddress,&dlIndo);
+    int nReturn = dladdr1(pFuncAddress,&dlIndoDlOpen,(void**)&pElfDlOpen,RTLD_DL_SYMENT);
+    if((!nReturn)||(!pElfDlOpen)){
+        return 2;
+    }
+    ullnDlOpenSize = (pElfDlOpen->st_size+7)/8*8;
+    unStrLenPlus1 = strlen(LIB_TO_OPENNAME) + 1;
+    unStrLenRounded = (unStrLenPlus1+7)/8*8;
+    unMallocSize = ullnDlOpenSize + unStrLenRounded;
+
+    //nReturn = dladdr(pMalloc,&dlIndo2);
+    const unsigned long long int lnBrkPoint=0xcc;
 
     nPid = fork();
 
@@ -118,8 +162,7 @@ int main(int a_argc, char* a_argv[])
         pid_t w;
         int status;
         enum __ptrace_setoptions options;
-
-        InitializeCrashAnalizer();
+        unsigned long long int ripInitial, rspInitial;
 
         printf("pid=%d\n",nPid);
         //kill(nPid,SIGSTOP);
@@ -128,18 +171,65 @@ int main(int a_argc, char* a_argv[])
         //kill(nPid,SIGCONT);
 
         ptrace(PTRACE_ATTACH,nPid);
-        waitpid(nPid,&status,0);
+        //waitpid(nPid,&status,0);
         options = PTRACE_O_TRACEEXEC;
         ptrace(PTRACE_SETOPTIONS ,nPid,&options);
+        //kill(nPid,SIGCONT);
         ptrace(PTRACE_CONT,nPid);
         sleep(1);
+
+        /* Here we start remote code running */
         ptrace(PTRACE_GETREGS, nPid, NULL, &regs);
         memcpy(&regs0,&regs,sizeof(regs));
-        regs.rip = reinterpret_cast<unsigned long long int>(pFuncAddress);
-        //regs.rdi = ;
+        regs.rsp -= 8;
+        //*reinterpret_cast<unsigned long long int*>(regs.rsp)=regs.rip; // should be written to the tracee
+        ptraceRead(nPid,regs.rip,&ripInitial,sizeof(unsigned long long int));
+        ptraceRead(nPid,regs.rsp,&rspInitial,sizeof(unsigned long long int));
+        ptraceWrite(nPid,regs0.rip,&lnBrkPoint,sizeof(unsigned long long int));
+        ptraceWrite(nPid,regs.rsp,&regs0.rip,sizeof(unsigned long long int));
+        //memcpy_into_target(nPid,reinterpret_cast<void*>(regs.rip),&lnBrkPoint,sizeof(unsigned long long int));
+
+        regs.rip = reinterpret_cast<unsigned long long int>(pMalloc);
+        regs.rdi = unMallocSize;
         ptrace(PTRACE_SETREGS, nPid, NULL, &regs);
+        ptrace(PTRACE_CONT,nPid);
+        wait(&status);
+        ptrace(PTRACE_GETREGS, nPid, NULL, &regs);
+        unsigned long long int ullnMallocReturned = regs.rax; // return from malloc
+
+        //ptraceWrite(nPid,regs0.rip,&ripInitial,sizeof(unsigned long long int));
+        //ptraceWrite(nPid,regs.rsp,&rspInitial,sizeof(unsigned long long int));
+        //ptrace(PTRACE_SETREGS, nPid, NULL, &regs0);
+        //ptrace(PTRACE_CONT,nPid);
+        //wait(&status);
+        /* End of remote code running */
 
 
+        /* Here we start remote code running */
+        regs.rsp -= 8;
+
+        ptraceWrite(nPid,ullnMallocReturned,pFuncAddress,pElfDlOpen->st_size);
+        ptraceWrite(nPid,ullnMallocReturned+ullnDlOpenSize,LIB_TO_OPENNAME,unStrLenPlus1);
+        ptraceWrite(nPid,regs0.rip,&lnBrkPoint,sizeof(unsigned long long int));
+        ptraceWrite(nPid,regs.rsp,&regs0.rip,sizeof(unsigned long long int));
+
+        regs.rip = ullnMallocReturned;
+        regs.rdi = ullnMallocReturned+ullnDlOpenSize;
+        regs.rsi = RTLD_NOW | NEW_RTLD_DLOPEN;
+
+        ptrace(PTRACE_SETREGS, nPid, NULL, &regs);
+        ptrace(PTRACE_CONT,nPid);
+        wait(&status);
+
+        ptraceWrite(nPid,regs0.rip,&ripInitial,sizeof(unsigned long long int));
+        ptraceWrite(nPid,regs0.rsp,&rspInitial,sizeof(unsigned long long int));
+        ptrace(PTRACE_SETREGS, nPid, NULL, &regs0);
+
+        ptrace(PTRACE_CONT,nPid);
+        /* End of remote code running */
+
+
+#if 0
 
         void* pMallocHookAddress = findRemoteSymbolAddress(LIBRARY_TO_SEARCH,&__malloc_hook,nPid);
         void* pReallocHookAddress = findRemoteSymbolAddress(LIBRARY_TO_SEARCH,&__realloc_hook,nPid);
@@ -148,9 +238,13 @@ int main(int a_argc, char* a_argv[])
         memcpy_into_target(nPid,pMallocHookAddress,&__malloc_hook,sizeof(__malloc_hook));
         memcpy_into_target(nPid,pReallocHookAddress,&__realloc_hook,sizeof(__realloc_hook));
         memcpy_into_target(nPid,pFreeHookAddress,&__free_hook,sizeof(__free_hook));
+#endif
 
         //kill(nPid,SIGCONT);
-        ptrace(PTRACE_CONT,nPid);
+        printf("sleeping 10 seconds \n");
+        sleep(5);
+        printf("end of sleep\n");
+        //ptrace(PTRACE_CONT,nPid);
         ptrace(PTRACE_DETACH, nPid);
 
         do {
@@ -177,12 +271,17 @@ int main(int a_argc, char* a_argv[])
         //SetMemoryInvestigator(&HookFunctionStatic);
         //kill(getpid(),SIGSTOP);
         //dlopen("/afs/ifh.de/user/k/kalantar/dev/sys/bionic/lib/libinject.so.1",RTLD_LAZY);
-        ptrace(PTRACE_TRACEME, 0, NULL, NULL);
+        //kill(nPid,SIGSTOP);
+        //ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         execvp (a_argv[1], a_argv+1);
     }
 
 	return 0;
 }
+
+
+//int RunCodeOnTheRemoteProc(pid_t a_pid, int a_nNumOfArgs, const void* a_pCode, )
+
 
 #include <string.h>
 

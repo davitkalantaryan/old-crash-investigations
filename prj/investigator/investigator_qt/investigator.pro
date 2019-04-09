@@ -13,7 +13,6 @@ LIBS += -ldl
 
 SOURCES  += \
     $${PWD}/../../../src/investigator/main_investigator.cpp \
-    $${PWD}/../../../src/investigator/crash_investigator_unix_gcc.cpp \
     $${PWD}/../../../src/util/utils.c
 
 	
