@@ -204,22 +204,26 @@ int main(int a_argc, char* a_argv[])
         //wait(&status);
         /* End of remote code running */
 
+        if(ullnMallocReturned){
+            regs.rsp -= 8;
+
+            ptraceWrite(nPid,ullnMallocReturned,pFuncAddress,pElfDlOpen->st_size);
+            ptraceWrite(nPid,ullnMallocReturned+ullnDlOpenSize,LIB_TO_OPENNAME,unStrLenPlus1);
+            ptraceWrite(nPid,regs0.rip,&lnBrkPoint,sizeof(unsigned long long int));
+            ptraceWrite(nPid,regs.rsp,&regs0.rip,sizeof(unsigned long long int));
+
+            regs.rip = ullnMallocReturned;
+            regs.rdi = ullnMallocReturned+ullnDlOpenSize;
+            regs.rsi = RTLD_NOW | NEW_RTLD_DLOPEN;
+
+            ptrace(PTRACE_SETREGS, nPid, NULL, &regs);
+            ptrace(PTRACE_CONT,nPid);
+            wait(&status);
+        }
+
 
         /* Here we start remote code running */
-        regs.rsp -= 8;
 
-        ptraceWrite(nPid,ullnMallocReturned,pFuncAddress,pElfDlOpen->st_size);
-        ptraceWrite(nPid,ullnMallocReturned+ullnDlOpenSize,LIB_TO_OPENNAME,unStrLenPlus1);
-        ptraceWrite(nPid,regs0.rip,&lnBrkPoint,sizeof(unsigned long long int));
-        ptraceWrite(nPid,regs.rsp,&regs0.rip,sizeof(unsigned long long int));
-
-        regs.rip = ullnMallocReturned;
-        regs.rdi = ullnMallocReturned+ullnDlOpenSize;
-        regs.rsi = RTLD_NOW | NEW_RTLD_DLOPEN;
-
-        ptrace(PTRACE_SETREGS, nPid, NULL, &regs);
-        ptrace(PTRACE_CONT,nPid);
-        wait(&status);
 
         ptraceWrite(nPid,regs0.rip,&ripInitial,sizeof(unsigned long long int));
         ptraceWrite(nPid,regs0.rsp,&rspInitial,sizeof(unsigned long long int));
