@@ -59,7 +59,7 @@ int main()
     //usleep(10000000);
     //InitializeCrashAnalizer();
     //SetMemoryInvestigator(&HookFunctionStatic);
-    printf("Crash analizer test!\n");
+    printf("Crash analizer test (pid:%d)!\n",getpid());
     //printf("Crash analizer test!\n");
 
     pMemory = new char[1];

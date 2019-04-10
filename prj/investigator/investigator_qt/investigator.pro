@@ -12,9 +12,8 @@ INCLUDEPATH += $${PWD}/../../../include
 LIBS += -ldl
 
 SOURCES  += \
-    $${PWD}/../../../src/investigator/main_investigator.cpp \
-    $${PWD}/../../../src/util/utils.c
-
+    $${PWD}/../../../src/investigator/main_investigator.c \
+    $${PWD}/../../../src/investigator/new_mmap.S
 	
 HEADERS += \
     $${PWD}/../../../include/crash_investigator.h \
@@ -33,4 +32,6 @@ OTHER_FILES += \
     $${PWD}/../../../src/investigator/crash_investigator_unix_gcc.cpp \
     $${PWD}/../../../src/util/inject_x86_64.c \
     $${PWD}/../../../src/util/utils.c \
-    $${PWD}/../../../src/util/ptrace.c
+    $${PWD}/../../../src/util/ptrace.c \
+    /doocs/develop/kalantar/dev/.others_codes/lattera/glibc/misc/mmap64.c \
+    /doocs/develop/kalantar/dev/.others_codes/lattera/glibc/misc/mmap.c

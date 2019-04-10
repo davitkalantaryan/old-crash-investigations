@@ -529,6 +529,7 @@ static void* realloc_no_user_at_all(void* a_ptr,size_t a_size)
                 int fd = open("/dev/zero", O_RDWR);
                 size_t previousSize;
                 if(fd<=0){return NEWNULLPTR;}
+                // todo: ANONYMOUS mapping shold be used mmap(NEWNULLPTR, 100, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
                 pcReturn = STATIC_CAST(char*, mmap(NEWNULLPTR, unAllocSize, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd, 0));
                 close(fd);
                 if(!pcReturn){return NEWNULLPTR;}
