@@ -21,6 +21,9 @@
 // addr2line -e  investigator 0x189b
 // gdb --silent --eval-command "info symbol 0x189b" -ex "quit" ./investigator
 // (gdb) info address _Z9eq_serveriPPc
+// cat > frames.txt << EOTEXT
+//  all
+// << EOTEXT
 
 #include <crash_investigator.h>
 #include <iostream>
