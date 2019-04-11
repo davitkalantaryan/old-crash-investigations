@@ -20,6 +20,7 @@
 // (gdb) info symbol 0x4005BDC
 // addr2line -e  investigator 0x189b
 // gdb --silent --eval-command "info symbol 0x189b" -ex "quit" ./investigator
+// (gdb) info address _Z9eq_serveriPPc
 
 
 #include <stdio.h>
@@ -55,16 +56,20 @@ int main()
     MyClass* pMemoryCls;
 
     //kill(getpid(),SIGSTOP);
-    //InitializeCrashAnalizer();
+    InitializeCrashAnalizer();
+
+    pMemory=static_cast<char*>(realloc(nullptr,1000));
+    free(pMemory);
     //usleep(10000000);
     //InitializeCrashAnalizer();
-    //SetMemoryInvestigator(&HookFunctionStatic);
+    SetMemoryInvestigator(&HookFunctionStatic);
     printf("Crash analizer test (pid:%d)!\n",getpid());
     //printf("Crash analizer test!\n");
 
+    //getchar();
     pMemory = new char[1];
     delete [] pMemory;
-    //delete pMemory;
+    delete pMemory;
     //delete (pMemory-1);
     printf("pMem = %p\n",static_cast<void*>(pMemory));
     //*(pMemory-80000) = 0;

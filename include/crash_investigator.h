@@ -19,6 +19,7 @@
 #include <stddef.h>
 
 #define MAX_NUMBER_OF_DELETED_ITEMS 16384
+#define FRAME_STRING_BEGIN  "frame: => "
 
 #ifdef __cplusplus
 #define EXTERN_C_2	extern "C"

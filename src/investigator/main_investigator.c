@@ -388,9 +388,22 @@ fail:
   return 1;
 }
 
+#include <sys/types.h>
+       #include <sys/stat.h>
+       #include <fcntl.h>
+
 int main(int argc, char **argv) {
     // dlopen = open + mmap
-    return fprintf_process(24963);
+    // /lib/x86_64-linux-gnu/libc.so.6
+    int fd = open("/lib/x86_64-linux-gnu/libc.so.6",O_RDONLY);
+    if(fd<0){
+        return 1;
+    }
+    void* pHandle = mmap(NULL,409600,PROT_EXEC|PROT_READ,MAP_PRIVATE,fd,0);
+    void* pMalloc = dlsym(pHandle,"malloc");
+    printf("pHandle=%p, malloc=%p\n",pHandle,pMalloc);
+    return 0;
+    //return fprintf_process(24963);
 #if 0
   long pid = -1;
   int c;

@@ -17,7 +17,7 @@
   */
 
 
-#define USE_MEMORY_HOOKS
+//#define USE_MEMORY_HOOKS
 
 
 #ifdef __GNUC__
@@ -25,19 +25,17 @@
 //#define DISABLE_UNUSED_PARS _Pargma()
 #endif
 
+#include <stdlib.h>
+
 #ifndef	_GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 
 #include <stdio.h>
-#include <stdlib.h>
 #include "crash_investigator.h"
 #include <unistd.h>
-#ifndef _GNU_SOURCE
-#endif
 #include <dlfcn.h>
 #include <pthread.h>
-
 #include <execinfo.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -46,8 +44,7 @@
 #include <memory.h>
 #include <signal.h>
 
-#define STACK_MAX_SIZE  256
-#define BACKTRACE_MALLOC_HOOK_BUFFER_SIZE   16384
+#define STACK_MAX_SIZE  64
 
 #define MEMOR_TYPE_REGULAR 0
 #define MEMOR_TYPE_MMAP 1
@@ -118,6 +115,7 @@ struct SMemoryItemPrivate{
     void *vBacktraceCrt[STACK_MAX_SIZE], *vBacktraceDel[STACK_MAX_SIZE];
     uint64_t isDeleted : 1;
     uint64_t bitwiseReserved : 63 ;
+    pthread_t  creationThread, deletionThread;
     int32_t stackDeepCrt, stackDeepDel;
 };
 
@@ -129,7 +127,8 @@ struct SMemoryHeader{
 };
 
 static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJustCreatedOrWillBeFreed, size_t a_size, void* a_pMemorForRealloc);
-static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed) __attribute__ ((noreturn));
+//static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed) __attribute__ ((noreturn));
+static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed, int a_Exit);
 static BOOL_T_2 UserHookFunctionDefault(enum HookType type,void* memoryCreatedOrWillBeFreed, size_t size, void* _memoryForRealloc);
 
 static void* malloc_general(enum HookType a_type,size_t a_size);
@@ -268,9 +267,7 @@ IS_STATIC void* hooked_realloc(void *a_ptr, size_t a_size,const void* a_nextMem)
 IS_STATIC void hooked_free(void *a_ptr, const void* a_nextMem)
 {    
 #pragma GCC diagnostic pop
-    if(a_ptr){
-        free_general(HookTypeFreeC,a_ptr);
-    }
+    free_general(HookTypeFreeC,a_ptr); // checking of nullptr is done in the free_general
 }
 
 /*/////////////////////////////////////////////////////////////////////////*/
@@ -281,6 +278,7 @@ static void* malloc_general(enum HookType a_type,size_t a_size)
     void* pReturn = NEWNULLPTR;
     int isLockedHere = 0;
     pthread_t thisThread = pthread_self();
+
 
     if(thisThread!=s_lockerThread){
         pthread_rwlock_wrlock(&s_rw_lock);
@@ -303,7 +301,11 @@ static void* malloc_general(enum HookType a_type,size_t a_size)
 static void free_general(enum HookType a_type,void* a_ptr)
 {
     int isLockedHere = 0;
-    pthread_t thisThread = pthread_self();
+    pthread_t thisThread;
+
+    if(!a_ptr){return;}
+
+    thisThread = pthread_self();
 
     if(thisThread!=s_lockerThread){
         pthread_rwlock_wrlock(&s_rw_lock);
@@ -682,13 +684,9 @@ static void* calloc_uses_mmap(size_t a_num, size_t a_size)
 static void SigSegvHandler(int a_nSigNum, siginfo_t * a_pSigInfo, void * a_pStackInfo)
 {    
 #pragma GCC diagnostic pop
-#if 1
-    //int nMemoryAllocationType = s_nMemoryAllocationType;
-    //s_nMemoryAllocationType = MEMOR_TYPE_INTERNAL;
     printf("Segmentation fault handler: sigNum=%d,sigInfoPtr=%p,context=%p,faulyAddress=%p\n",a_nSigNum,static_cast<void*>(a_pSigInfo),a_pStackInfo,a_pSigInfo->si_addr);
     //s_nMemoryAllocationType = nMemoryAllocationType;
-    AnalizeBadMemoryCase(a_pSigInfo->si_addr);
-#endif
+    AnalizeBadMemoryCase(a_pSigInfo->si_addr,0);
 }
 
 
@@ -831,7 +829,6 @@ returnPoint:
 /*///////////////////////////////////////////////////////////////////////////////////////////////////////*/
 
 
-
 //#define INTERNAL_BUFFER_REALLOC_SIZE   16384
 //static size_t s_nInternalBufferSize = 0;
 //static char* s_pcInternalBuffer = NEWNULLPTR;
@@ -936,9 +933,25 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
 #endif
 
     switch(a_type){
-    case HookTypeMallocC: case HookTypeCallocC: case HookTypeReallocC:
+    case HookTypeMallocC: case HookTypeCallocC:
         memoryType = CreatedByMalloc;
         isAdding = 1;
+        break;
+    case HookTypeReallocC:
+#ifndef DISABLE_REALLOC_HANDLING
+
+        if(a_pMemorForRealloc && (pItem = FindMemoryItem(a_pMemorForRealloc, &s_existing))){
+            //printf("realloc (will only be modified): size=%d, prevMem=%p\n", STATIC_CAST(int,a_size),a_pMemorForRealloc);
+            pItem->userItem.startingAddress = STATIC_CAST(char*,a_memoryJustCreatedOrWillBeFreed);
+            pItem->userItem.size = a_size;
+        }
+        else
+#endif
+        {
+            //printf("realloc (will be added): size=%d, prevMem=%p\n", STATIC_CAST(int,a_size),a_pMemorForRealloc);
+            memoryType = CreatedByMalloc;
+            isAdding = 1;
+        }
         break;
     case HookTypeNewCpp:
         memoryType = CreatedByNew;
@@ -952,7 +965,7 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
         pItem = FindMemoryItem(a_memoryJustCreatedOrWillBeFreed, &s_existing);
         if(!pItem){
             fprintf(stderr, "!!!!!! Trying to delete non existing memory!\n");
-            AnalizeBadMemoryCase(a_memoryJustCreatedOrWillBeFreed);
+            AnalizeBadMemoryCase(a_memoryJustCreatedOrWillBeFreed,1);
             goto returnPoint;
         }
         if(
@@ -961,10 +974,11 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
                 ((a_type==HookTypeDeleteArrayCpp)&&(pItem->userItem.type!=CreatedByNewArray))    ){
             fprintf(stderr, "!!!!!! Trying to deallocate using non consistent function!\n");
             // todo: shall Application be crashed?
-            AnalizeBadMemoryCase(a_memoryJustCreatedOrWillBeFreed);
+            AnalizeBadMemoryCase(a_memoryJustCreatedOrWillBeFreed,1);
             goto returnPoint;
         }
         pItem->isDeleted = 1;
+        pItem->deletionThread = pthread_self();
         RemoveSMemoryItemFromList(pItem,&s_existing);
         pItem->stackDeepDel = backtrace(pItem->vBacktraceDel,STACK_MAX_SIZE);
         AddSMemoryItemToList(pItem,&s_deleted);
@@ -997,6 +1011,8 @@ static void CrashAnalizerMemHookFunction(enum HookType a_type, void* a_memoryJus
         pItem->userItem.type = memoryType;
         pItem->userItem.startingAddress = STATIC_CAST(char*,a_memoryJustCreatedOrWillBeFreed);
         pItem->userItem.size = a_size;
+        pItem->creationThread = pthread_self();
+        pItem->deletionThread = 0;
         AddSMemoryItemToList(pItem,&s_existing);
     }
 
@@ -1015,9 +1031,12 @@ returnPoint:
 }
 
 
-static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepness);
+enum BacktraceType{BacktraceTypeCreation,BacktraceTypeDeletion,BacktraceTypeAction,BacktraceTypeLast};
+static const char* s_vcpcBacktraceType[] = {"Creation","Deletion","Current"};
 
-static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed)
+static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepness,enum BacktraceType nType, pthread_t a_thread);
+
+static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed, int a_Exit)
 {
     char* pcMemoryJustCreatedOrWillBeFreed = STATIC_CAST(char*,a_memoryJustCreatedOrWillBeFreed);
     ptrdiff_t leftDiffMin=-1, rightDiffMin=-1, diffCurrentLeft, diffCurrentRight;
@@ -1029,7 +1048,7 @@ static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed)
 
     nFailedBacktraceSize = backtrace(vBacktrace,STACK_MAX_SIZE);
     printf("Analizing memory %p in the stack \n",a_memoryJustCreatedOrWillBeFreed);
-    AnalizeStackFromBacktrace(vBacktrace,nFailedBacktraceSize);
+    AnalizeStackFromBacktrace(vBacktrace,nFailedBacktraceSize,BacktraceTypeAction,pthread_self());
 
     pCurrent=s_existing.first;
     while(pCurrent){
@@ -1084,47 +1103,43 @@ static void AnalizeBadMemoryCase(void* a_memoryJustCreatedOrWillBeFreed)
 analizePoint:
     if(isInsideExisting){
         printf("The problematic memory is inside existing memories pool\nCreated in the following stack\n");
-        AnalizeStackFromBacktrace(pCurrent->vBacktraceCrt,pCurrent->stackDeepCrt);
+        AnalizeStackFromBacktrace(pCurrent->vBacktraceCrt,pCurrent->stackDeepCrt,BacktraceTypeCreation,pCurrent->creationThread);
     }
 
     else if(isInsideDeleted){
         printf("The problematic memory is inside deleted memory pool\n");
         printf("Created in the following stack\n");
-        AnalizeStackFromBacktrace(pCurrent->vBacktraceCrt,pCurrent->stackDeepCrt);
+        AnalizeStackFromBacktrace(pCurrent->vBacktraceCrt,pCurrent->stackDeepCrt,BacktraceTypeCreation,pCurrent->creationThread);
         printf("Deleted in the following stack\n");
-        AnalizeStackFromBacktrace(pCurrent->vBacktraceDel,pCurrent->stackDeepDel);
+        AnalizeStackFromBacktrace(pCurrent->vBacktraceDel,pCurrent->stackDeepDel,BacktraceTypeDeletion,pCurrent->deletionThread);
     }
     else{
         if(pLeftMin){
-            if(isLeftMinFromDeleted){
+            if(isLeftMinFromDeleted && pLeftMin->isDeleted){
                 printf("\nbigger nearest memory is deleted. Deleting stack is:\n");
-                AnalizeStackFromBacktrace(pLeftMin->vBacktraceDel,pLeftMin->stackDeepDel);
+                AnalizeStackFromBacktrace(pLeftMin->vBacktraceDel,pLeftMin->stackDeepDel,BacktraceTypeDeletion,pLeftMin->deletionThread);
             }
             printf("\nbigger nearest memory creation stack is:\n");
-            AnalizeStackFromBacktrace(pLeftMin->vBacktraceCrt,pLeftMin->stackDeepCrt);
+            AnalizeStackFromBacktrace(pLeftMin->vBacktraceCrt,pLeftMin->stackDeepCrt,BacktraceTypeCreation,pLeftMin->creationThread);
         }
 
         if(pRightMin){
-            if(isRightMinFromDeleted){
+            if(isRightMinFromDeleted&&pLeftMin->isDeleted){
                 printf("\nsmaller nearest memory is deleted. Deleting stack is:\n");
-                AnalizeStackFromBacktrace(pRightMin->vBacktraceDel,pRightMin->stackDeepDel);
+                AnalizeStackFromBacktrace(pRightMin->vBacktraceDel,pRightMin->stackDeepDel,BacktraceTypeDeletion,pRightMin->deletionThread);
             }
             printf("\nsmaller nearest memory creation stack is:\n");
-            AnalizeStackFromBacktrace(pRightMin->vBacktraceCrt,pRightMin->stackDeepCrt);
+            AnalizeStackFromBacktrace(pRightMin->vBacktraceCrt,pRightMin->stackDeepCrt,BacktraceTypeCreation,pRightMin->creationThread);
         }
     }
-    _Exit(1);
+    if(a_Exit){_Exit(1);}
 
 }
 
 
-
-
-
-static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepness)
+static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepness, enum BacktraceType a_type, pthread_t a_thread)
 {
     if(a_nStackDeepness>0){
-        char** ppSymbols;
         TypeMalloc2 malloc_aktual = s_malloc_aktual;
         TypeRealloc realloc_aktual = s_realloc_aktual;
         TypeCalloc calloc_aktual = s_calloc_aktual;
@@ -1135,20 +1150,23 @@ static void AnalizeStackFromBacktrace(void** a_pBacktrace, int32_t a_nStackDeepn
         s_calloc_aktual = &calloc_calls_libc;
         s_free_aktual = &free_no_user_at_all;
 
-        if(a_nStackDeepness>2){
-            a_pBacktrace += 2;
-            a_nStackDeepness -= 2;
+        if(a_nStackDeepness>4){
+            char** ppSymbols;
+            a_pBacktrace += 4;
+            a_nStackDeepness -= 4;
             ppSymbols = backtrace_symbols(a_pBacktrace,a_nStackDeepness);
             if(ppSymbols){
-                a_nStackDeepness -= 1;
-                ppSymbols += 1;
-                printf("================ Stack starts ================\n");
+                char vcThreadName[128];
+                vcThreadName[0]=0;
+                pthread_getname_np(a_thread,vcThreadName,127);
+                printf("================ %s(thread:%s) stack starts ================\n", s_vcpcBacktraceType[a_type],vcThreadName);
                 for(int32_t i=0; i<a_nStackDeepness; ++i)
                 {
                     //printf("%p:%s\n",a_pBacktrace[i],ppSymbols[i]);
-                    printf("%s\n",ppSymbols[i]);
+                    printf( FRAME_STRING_BEGIN "%s\n",ppSymbols[i]);
+                    //printf("%s [%p]\n",ppSymbols[i],a_pBacktrace[i]);
                 }
-                printf("================ Stack   ends ================\n");
+                printf("================ endo of stack %s(thread:%s) ================\n",s_vcpcBacktraceType[a_type],vcThreadName);
             }
             free(ppSymbols);
         }

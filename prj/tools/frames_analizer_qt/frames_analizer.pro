@@ -14,8 +14,7 @@ INCLUDEPATH += $${PWD}/../../../include
 LIBS += -ldl
 
 SOURCES  += \
-    $${PWD}/../../../src/test/main_inner_investigator_test.cpp \
-    $${PWD}/../../../src/investigator/crash_investigator_unix_gcc.cpp
+    $${PWD}/../../../src/tools/main_frames_analizer.cpp
 	
 HEADERS += \
     $${PWD}/../../../include/crash_investigator.h
